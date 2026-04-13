@@ -1,0 +1,89 @@
+package agent
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/dshills/matter/internal/config"
+	"github.com/dshills/matter/internal/llm"
+	"github.com/dshills/matter/internal/memory"
+	"github.com/dshills/matter/internal/planner"
+	"github.com/dshills/matter/internal/policy"
+	"github.com/dshills/matter/internal/tools"
+	"github.com/dshills/matter/pkg/matter"
+)
+
+// Agent orchestrates a single run: plan → policy → execute → store → check limits.
+type Agent struct {
+	cfg       config.Config
+	llmClient llm.Client
+	planner   *planner.Planner
+	executor  *tools.Executor
+	registry  *tools.Registry
+	memory    *memory.Manager
+	policy    policy.Checker
+	metrics   RunMetrics
+	detector  *LoopDetector
+}
+
+// New creates an agent with the given configuration and dependencies.
+func New(
+	cfg config.Config,
+	llmClient llm.Client,
+	registry *tools.Registry,
+	policyChecker policy.Checker,
+) *Agent {
+	return &Agent{
+		cfg:       cfg,
+		planner:   planner.NewPlanner(llmClient),
+		executor:  tools.NewExecutor(registry),
+		registry:  registry,
+		llmClient: llmClient,
+		policy:    policyChecker,
+	}
+}
+
+// Run executes the agent loop for the given request.
+// Each call resets internal state (memory, metrics, loop detector) so the
+// agent can be reused across runs.
+func (a *Agent) Run(ctx context.Context, req matter.RunRequest) matter.RunResult {
+	// Reset per-run state.
+	a.memory = memory.NewManager(a.cfg.Memory, a.llmClient)
+	a.detector = NewLoopDetector(a.cfg.Agent.MaxRepeatedToolCalls)
+	a.metrics = RunMetrics{StartTime: time.Now()}
+
+	// Seed memory with the system prompt and user task.
+	sysMsg := matter.Message{
+		Role:      matter.RoleSystem,
+		Content:   "You are an autonomous agent. Complete the user's task.",
+		Timestamp: time.Now(),
+	}
+	if err := a.memory.Add(ctx, sysMsg); err != nil {
+		return matter.RunResult{Error: fmt.Errorf("failed to seed system message: %w", err)}
+	}
+
+	taskMsg := matter.Message{
+		Role:      matter.RoleUser,
+		Content:   req.Task,
+		Timestamp: time.Now(),
+	}
+	if err := a.memory.Add(ctx, taskMsg); err != nil {
+		return matter.RunResult{Error: fmt.Errorf("failed to seed task message: %w", err)}
+	}
+
+	// Enter the step loop.
+	result := a.loop(ctx, req)
+
+	// Populate final metrics.
+	result.Steps = a.metrics.Steps
+	result.TotalTokens = a.metrics.TotalTokens
+	result.TotalCostUSD = a.metrics.CostUSD
+
+	return result
+}
+
+// Metrics returns the current run metrics.
+func (a *Agent) Metrics() RunMetrics {
+	return a.metrics
+}

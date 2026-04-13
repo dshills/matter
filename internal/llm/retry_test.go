@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	agenterr "github.com/dshills/matter/internal/agent"
+	"github.com/dshills/matter/internal/errtype"
 )
 
 func TestRetryClientSuccessNoRetry(t *testing.T) {
@@ -50,7 +50,7 @@ func TestRetryClientRetriesOnTransient(t *testing.T) {
 }
 
 func TestRetryClientNoRetryOnTerminal(t *testing.T) {
-	terminalErr := agenterr.NewLLMError("auth failed", nil, false) // false = terminal
+	terminalErr := errtype.NewLLMError("auth failed", nil, false) // false = terminal
 	mock := NewMockClient([]Response{{}}, []error{terminalErr})
 	client := NewRetryClient(mock, 3)
 	client.baseDelay = time.Millisecond
@@ -65,7 +65,7 @@ func TestRetryClientNoRetryOnTerminal(t *testing.T) {
 }
 
 func TestRetryClientRetriesOnRetriableAgentError(t *testing.T) {
-	retriableErr := agenterr.NewLLMError("timeout", nil, true) // true = retriable
+	retriableErr := errtype.NewLLMError("timeout", nil, true) // true = retriable
 	responses := []Response{{}, {Content: "ok"}}
 	errs := []error{retriableErr, nil}
 	mock := NewMockClient(responses, errs)

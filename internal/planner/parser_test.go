@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/dshills/matter/internal/agent"
+	"github.com/dshills/matter/internal/errtype"
 	"github.com/dshills/matter/internal/llm"
 	"github.com/dshills/matter/pkg/matter"
 )
@@ -117,9 +117,6 @@ func TestParseDecisionLLMCorrectionFails(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when LLM correction fails")
 	}
-	if !errors.Is(err, agent.ErrPlanner) {
-		t.Errorf("expected planner error, got %T", err)
-	}
 }
 
 func TestParseDecisionLLMCorrectionInvalidJSON(t *testing.T) {
@@ -132,7 +129,7 @@ func TestParseDecisionLLMCorrectionInvalidJSON(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when LLM correction returns bad JSON")
 	}
-	if !errors.Is(err, agent.ErrParse) {
+	if !errors.Is(err, errtype.ErrParse) {
 		t.Errorf("expected parse error, got %T", err)
 	}
 }

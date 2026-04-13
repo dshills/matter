@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dshills/matter/internal/agent"
+	"github.com/dshills/matter/internal/errtype"
 	"github.com/dshills/matter/internal/llm"
 	"github.com/dshills/matter/pkg/matter"
 )
@@ -60,7 +60,7 @@ func (p *Planner) Decide(
 
 	resp, err := p.client.Complete(ctx, req)
 	if err != nil {
-		return matter.Decision{}, resp, agent.NewLLMError("planner LLM call failed", err, true)
+		return matter.Decision{}, resp, errtype.NewLLMError("planner LLM call failed", err, true)
 	}
 
 	result, parseErr := ParseDecision(ctx, p.client, resp.Content)

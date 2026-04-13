@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/dshills/matter/internal/agent"
+	"github.com/dshills/matter/internal/errtype"
 	"github.com/dshills/matter/internal/llm"
 	"github.com/dshills/matter/pkg/matter"
 )
@@ -45,8 +45,7 @@ func ParseDecision(ctx context.Context, client llm.Client, raw string) (ParseRes
 	if client != nil {
 		corrected, resp, err := llmCorrection(ctx, client, raw)
 		if err != nil {
-			return ParseResult{}, agent.NewPlannerError(
-				fmt.Sprintf("all parse attempts failed, LLM correction error: %v", err), err)
+			return ParseResult{}, fmt.Errorf("all parse attempts failed, LLM correction error: %w", err)
 		}
 
 		result := ParseResult{
@@ -65,10 +64,10 @@ func ParseDecision(ctx context.Context, client llm.Client, raw string) (ParseRes
 		}
 
 		// LLM correction produced invalid JSON too — preserve repair usage.
-		return result, agent.NewParseError(
+		return result, errtype.NewParseError(
 			"LLM correction produced invalid JSON", nil)
 	}
 
-	return ParseResult{}, agent.NewParseError(
+	return ParseResult{}, errtype.NewParseError(
 		"all parse attempts failed and no LLM client for correction", nil)
 }

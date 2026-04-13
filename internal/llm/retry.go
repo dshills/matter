@@ -6,7 +6,7 @@ import (
 	"math/rand/v2"
 	"time"
 
-	agenterr "github.com/dshills/matter/internal/agent"
+	"github.com/dshills/matter/internal/errtype"
 )
 
 const maxBackoffDelay = 30 * time.Second
@@ -79,8 +79,8 @@ func (r *RetryClient) backoff(attempt int) time.Duration {
 // isRetriable determines whether an error should be retried.
 // Uses the agent error classification system when available.
 func isRetriable(err error) bool {
-	if agentErr, ok := errors.AsType[*agenterr.AgentError](err); ok {
-		return agentErr.Classification == agenterr.ClassRetriable
+	if agentErr, ok := errors.AsType[*errtype.AgentError](err); ok {
+		return agentErr.Classification == errtype.ClassRetriable
 	}
 	// Context errors are not retriable (the caller cancelled).
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

@@ -1,135 +1,64 @@
+// Package agent provides the core agent loop and run orchestration.
+// Error types are defined in internal/errtype to avoid import cycles.
 package agent
 
-import (
-	"errors"
-	"fmt"
+import "github.com/dshills/matter/internal/errtype"
+
+// Re-export error types so existing code within the agent package can use them directly.
+type (
+	ErrorCategory       = errtype.ErrorCategory
+	ErrorClassification = errtype.ErrorClassification
+	AgentError          = errtype.AgentError
 )
 
-// ErrorCategory identifies the type of error.
-type ErrorCategory string
-
+// Re-export error category constants.
 const (
-	ErrCatPlanner         ErrorCategory = "planner_error"
-	ErrCatLLM             ErrorCategory = "llm_error"
-	ErrCatToolValidation  ErrorCategory = "tool_validation_error"
-	ErrCatToolExecution   ErrorCategory = "tool_execution_error"
-	ErrCatTimeout         ErrorCategory = "timeout_error"
-	ErrCatLimitExceeded   ErrorCategory = "limit_exceeded_error"
-	ErrCatPolicyViolation ErrorCategory = "policy_violation_error"
-	ErrCatParse           ErrorCategory = "parse_error"
-	ErrCatReplay          ErrorCategory = "replay_error"
-	ErrCatSandboxResource ErrorCategory = "sandbox_resource_error"
-	ErrCatConfiguration   ErrorCategory = "configuration_error"
+	ErrCatPlanner         = errtype.ErrCatPlanner
+	ErrCatLLM             = errtype.ErrCatLLM
+	ErrCatToolValidation  = errtype.ErrCatToolValidation
+	ErrCatToolExecution   = errtype.ErrCatToolExecution
+	ErrCatTimeout         = errtype.ErrCatTimeout
+	ErrCatLimitExceeded   = errtype.ErrCatLimitExceeded
+	ErrCatPolicyViolation = errtype.ErrCatPolicyViolation
+	ErrCatParse           = errtype.ErrCatParse
+	ErrCatReplay          = errtype.ErrCatReplay
+	ErrCatSandboxResource = errtype.ErrCatSandboxResource
+	ErrCatConfiguration   = errtype.ErrCatConfiguration
 )
 
-// ErrorClassification determines how the agent loop handles an error.
-type ErrorClassification int
-
+// Re-export classification constants.
 const (
-	// ClassRetriable indicates transient failures that should be retried with backoff.
-	ClassRetriable ErrorClassification = iota
-	// ClassRecoverable indicates non-transient failures returned to the agent loop for replanning.
-	ClassRecoverable
-	// ClassTerminal indicates fatal failures that immediately end the run.
-	ClassTerminal
+	ClassRetriable   = errtype.ClassRetriable
+	ClassRecoverable = errtype.ClassRecoverable
+	ClassTerminal    = errtype.ClassTerminal
 )
 
-// AgentError is a typed error with category and classification.
-type AgentError struct {
-	Category       ErrorCategory
-	Classification ErrorClassification
-	Message        string
-	Cause          error
-}
-
-func (e *AgentError) Error() string {
-	if e.Cause != nil {
-		return fmt.Sprintf("%s: %s: %v", e.Category, e.Message, e.Cause)
-	}
-	return fmt.Sprintf("%s: %s", e.Category, e.Message)
-}
-
-func (e *AgentError) Unwrap() error {
-	return e.Cause
-}
-
-// Is supports errors.Is matching by category.
-func (e *AgentError) Is(target error) bool {
-	if t, ok := errors.AsType[*AgentError](target); ok {
-		return e.Category == t.Category
-	}
-	return false
-}
-
-// Sentinel errors for errors.Is matching.
+// Re-export sentinel errors.
 var (
-	ErrPlanner         = &AgentError{Category: ErrCatPlanner}
-	ErrLLM             = &AgentError{Category: ErrCatLLM}
-	ErrToolValidation  = &AgentError{Category: ErrCatToolValidation}
-	ErrToolExecution   = &AgentError{Category: ErrCatToolExecution}
-	ErrTimeout         = &AgentError{Category: ErrCatTimeout}
-	ErrLimitExceeded   = &AgentError{Category: ErrCatLimitExceeded}
-	ErrPolicyViolation = &AgentError{Category: ErrCatPolicyViolation}
-	ErrParse           = &AgentError{Category: ErrCatParse}
-	ErrReplay          = &AgentError{Category: ErrCatReplay}
-	ErrSandboxResource = &AgentError{Category: ErrCatSandboxResource}
-	ErrConfiguration   = &AgentError{Category: ErrCatConfiguration}
+	ErrPlanner         = errtype.ErrPlanner
+	ErrLLM             = errtype.ErrLLM
+	ErrToolValidation  = errtype.ErrToolValidation
+	ErrToolExecution   = errtype.ErrToolExecution
+	ErrTimeout         = errtype.ErrTimeout
+	ErrLimitExceeded   = errtype.ErrLimitExceeded
+	ErrPolicyViolation = errtype.ErrPolicyViolation
+	ErrParse           = errtype.ErrParse
+	ErrReplay          = errtype.ErrReplay
+	ErrSandboxResource = errtype.ErrSandboxResource
+	ErrConfiguration   = errtype.ErrConfiguration
 )
 
-// Constructor functions for each error category.
-
-func NewPlannerError(msg string, cause error) *AgentError {
-	return &AgentError{Category: ErrCatPlanner, Classification: ClassRecoverable, Message: msg, Cause: cause}
-}
-
-func NewLLMError(msg string, cause error, retriable bool) *AgentError {
-	cls := ClassTerminal
-	if retriable {
-		cls = ClassRetriable
-	}
-	return &AgentError{Category: ErrCatLLM, Classification: cls, Message: msg, Cause: cause}
-}
-
-func NewToolValidationError(msg string, cause error) *AgentError {
-	return &AgentError{Category: ErrCatToolValidation, Classification: ClassRecoverable, Message: msg, Cause: cause}
-}
-
-func NewToolExecutionError(msg string, cause error, fatal bool) *AgentError {
-	cls := ClassRecoverable
-	if fatal {
-		cls = ClassTerminal
-	}
-	return &AgentError{Category: ErrCatToolExecution, Classification: cls, Message: msg, Cause: cause}
-}
-
-func NewTimeoutError(msg string, cause error, isRunTimeout bool) *AgentError {
-	cls := ClassRecoverable
-	if isRunTimeout {
-		cls = ClassTerminal
-	}
-	return &AgentError{Category: ErrCatTimeout, Classification: cls, Message: msg, Cause: cause}
-}
-
-func NewLimitExceededError(msg string) *AgentError {
-	return &AgentError{Category: ErrCatLimitExceeded, Classification: ClassTerminal, Message: msg}
-}
-
-func NewPolicyViolationError(msg string) *AgentError {
-	return &AgentError{Category: ErrCatPolicyViolation, Classification: ClassTerminal, Message: msg}
-}
-
-func NewParseError(msg string, cause error) *AgentError {
-	return &AgentError{Category: ErrCatParse, Classification: ClassRecoverable, Message: msg, Cause: cause}
-}
-
-func NewReplayError(msg string, cause error) *AgentError {
-	return &AgentError{Category: ErrCatReplay, Classification: ClassTerminal, Message: msg, Cause: cause}
-}
-
-func NewSandboxResourceError(msg string, cause error) *AgentError {
-	return &AgentError{Category: ErrCatSandboxResource, Classification: ClassRecoverable, Message: msg, Cause: cause}
-}
-
-func NewConfigurationError(msg string, cause error) *AgentError {
-	return &AgentError{Category: ErrCatConfiguration, Classification: ClassTerminal, Message: msg, Cause: cause}
-}
+// Re-export constructor functions.
+var (
+	NewPlannerError         = errtype.NewPlannerError
+	NewLLMError             = errtype.NewLLMError
+	NewToolValidationError  = errtype.NewToolValidationError
+	NewToolExecutionError   = errtype.NewToolExecutionError
+	NewTimeoutError         = errtype.NewTimeoutError
+	NewLimitExceededError   = errtype.NewLimitExceededError
+	NewPolicyViolationError = errtype.NewPolicyViolationError
+	NewParseError           = errtype.NewParseError
+	NewReplayError          = errtype.NewReplayError
+	NewSandboxResourceError = errtype.NewSandboxResourceError
+	NewConfigurationError   = errtype.NewConfigurationError
+)
