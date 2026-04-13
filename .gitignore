@@ -26,6 +26,10 @@ Thumbs.db
 # Matter runtime
 .matter/
 
+# Tools
+.atlas/
+.claude/settings.json
+
 # Environment
 .env
 .env.*
