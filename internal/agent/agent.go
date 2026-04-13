@@ -8,6 +8,7 @@ import (
 	"github.com/dshills/matter/internal/config"
 	"github.com/dshills/matter/internal/llm"
 	"github.com/dshills/matter/internal/memory"
+	"github.com/dshills/matter/internal/observe"
 	"github.com/dshills/matter/internal/planner"
 	"github.com/dshills/matter/internal/policy"
 	"github.com/dshills/matter/internal/tools"
@@ -23,6 +24,8 @@ type Agent struct {
 	registry  *tools.Registry
 	memory    *memory.Manager
 	policy    policy.Checker
+	observer  *observe.Observer
+	session   *observe.RunSession
 	metrics   RunMetrics
 	detector  *LoopDetector
 }
@@ -53,6 +56,11 @@ func (a *Agent) Run(ctx context.Context, req matter.RunRequest) matter.RunResult
 	a.detector = NewLoopDetector(a.cfg.Agent.MaxRepeatedToolCalls)
 	a.metrics = RunMetrics{StartTime: time.Now()}
 
+	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
+	if a.observer != nil {
+		a.session = a.observer.StartRun(runID, req.Task, a.cfg)
+	}
+
 	// Seed memory with the system prompt and user task.
 	sysMsg := matter.Message{
 		Role:      matter.RoleSystem,
@@ -80,7 +88,17 @@ func (a *Agent) Run(ctx context.Context, req matter.RunRequest) matter.RunResult
 	result.TotalTokens = a.metrics.TotalTokens
 	result.TotalCostUSD = a.metrics.CostUSD
 
+	if a.session != nil {
+		duration := time.Since(a.metrics.StartTime)
+		a.session.EndRun(result.Success, result.FinalSummary, a.metrics.Steps, duration, a.metrics.TotalTokens, a.metrics.CostUSD)
+	}
+
 	return result
+}
+
+// SetObserver attaches an observer for logging, tracing, metrics, and recording.
+func (a *Agent) SetObserver(obs *observe.Observer) {
+	a.observer = obs
 }
 
 // Metrics returns the current run metrics.

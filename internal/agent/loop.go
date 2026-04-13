@@ -22,6 +22,9 @@ func (a *Agent) loop(ctx context.Context, req matter.RunRequest) matter.RunResul
 
 		// Evaluate limits before each step.
 		if lc := EvaluateLimits(a.cfg.Agent, a.metrics); lc.Exceeded {
+			if a.session != nil {
+				a.session.LimitExceeded(a.metrics.Steps, lc.Limit, lc.Message)
+			}
 			return matter.RunResult{
 				Error: NewLimitExceededError(lc.Message),
 			}
@@ -30,6 +33,10 @@ func (a *Agent) loop(ctx context.Context, req matter.RunRequest) matter.RunResul
 		result, done := a.step(ctx, req)
 		if done {
 			return result
+		}
+
+		if a.session != nil {
+			a.session.StepCompleted(a.metrics.Steps)
 		}
 	}
 }
@@ -58,6 +65,11 @@ func (a *Agent) step(ctx context.Context, req matter.RunRequest) (matter.RunResu
 	}
 
 	// Call planner.
+	if a.session != nil {
+		a.session.PlannerStarted(a.metrics.Steps)
+	}
+
+	planStart := time.Now()
 	memCtx := a.memory.Context()
 	decision, resp, planErr := a.planner.Decide(ctx, req.Task, memCtx, string(toolSchemas), budget)
 
@@ -68,7 +80,14 @@ func (a *Agent) step(ctx context.Context, req matter.RunRequest) (matter.RunResu
 	a.metrics.CostUSD += resp.EstimatedCostUSD
 
 	if planErr != nil {
+		if a.session != nil {
+			a.session.PlannerFailed(a.metrics.Steps, planErr)
+		}
 		return a.handleError(ctx, planErr, nil)
+	}
+
+	if a.session != nil {
+		a.session.PlannerCompleted(a.metrics.Steps, resp.TotalTokens, resp.EstimatedCostUSD, time.Since(planStart))
 	}
 
 	// Handle terminal decisions.
@@ -132,6 +151,10 @@ func (a *Agent) executeTool(ctx context.Context, decision matter.Decision) (matt
 	a.detector.RecordCall(tc.Name, tc.Input)
 
 	// Execute the tool.
+	if a.session != nil {
+		a.session.ToolStarted(a.metrics.Steps, tc.Name)
+	}
+	toolStart := time.Now()
 	rec := a.executor.Execute(ctx, a.metrics.Steps, tc.Name, tc.Input)
 
 	// Store the planner decision as an assistant message.
@@ -158,6 +181,11 @@ func (a *Agent) executeTool(ctx context.Context, decision matter.Decision) (matt
 	}
 	if err := a.memory.Add(ctx, toolMsg); err != nil {
 		return matter.RunResult{Error: fmt.Errorf("failed to store tool result: %w", err)}, true
+	}
+
+	// Notify observer of tool completion.
+	if a.session != nil {
+		a.session.ToolCompleted(a.metrics.Steps, tc.Name, time.Since(toolStart), rec.Error)
 	}
 
 	// Check for tool execution errors.
