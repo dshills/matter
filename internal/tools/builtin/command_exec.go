@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -33,9 +34,15 @@ var CommandExecSchema = []byte(`{
 	"additionalProperties": false
 }`)
 
+// restrictedPATH is the sandboxed PATH used by command_exec per spec §3.2.
+// Intentionally Unix-only: matter targets Linux/macOS; Windows is out of scope for v1.
+// Uses colon separator and standard Unix bin directories.
+const restrictedPATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
 // NewCommandExec creates the command_exec tool with the given workspace root,
-// timeout, and output size limit.
-func NewCommandExec(workspaceRoot string, timeout time.Duration, maxOutputBytes int) matter.Tool {
+// timeout, output size limit, and optional command allowlist.
+// An empty allowlist permits all commands (v1 backward compatibility).
+func NewCommandExec(workspaceRoot string, timeout time.Duration, maxOutputBytes int, allowlist []string) matter.Tool {
 	return matter.Tool{
 		Name:         "command_exec",
 		Description:  "Execute a command in the workspace directory. Output is capped. Stdin is closed.",
@@ -44,11 +51,72 @@ func NewCommandExec(workspaceRoot string, timeout time.Duration, maxOutputBytes 
 		Safe:         false,
 		SideEffect:   true,
 		FatalOnError: false,
-		Execute:      commandExecFunc(workspaceRoot, maxOutputBytes),
+		Execute:      commandExecFunc(workspaceRoot, maxOutputBytes, allowlist),
 	}
 }
 
-func commandExecFunc(workspaceRoot string, maxOutputBytes int) matter.ToolExecuteFunc {
+// isCommandAllowed checks if a command is permitted by the allowlist.
+// It searches restricted PATH directories directly (not exec.LookPath)
+// to find the binary, then verifies the base name is in the allowlist. Workspace-local binaries
+// (relative or absolute paths outside the restricted PATH) are intentionally
+// rejected per spec §3.2 — this is a security boundary preventing path
+// manipulation bypasses. Returns the resolved command path (or original
+// if no allowlist) and an error message if rejected.
+func isCommandAllowed(command string, allowlist []string) (string, string) {
+	if len(allowlist) == 0 {
+		return command, ""
+	}
+
+	// Reject commands containing path separators (relative or absolute paths)
+	// per spec §3.2 — only bare command names are allowed with an allowlist.
+	if strings.ContainsAny(command, `/\`) || filepath.IsAbs(command) {
+		return "", fmt.Sprintf("command %q contains a path component; only bare command names are allowed with an allowlist", command)
+	}
+
+	// Resolve the command by searching only the restricted PATH directories,
+	// not the host's PATH. This ensures consistent resolution regardless of
+	// the host environment.
+	absResolved := ""
+	for _, dir := range strings.Split(restrictedPATH, ":") {
+		candidate := filepath.Join(dir, command)
+		info, err := os.Stat(candidate)
+		// Unix executable-bit check; Windows is out of scope for v1 (see restrictedPATH).
+		if err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			absResolved = candidate
+			break
+		}
+	}
+	if absResolved == "" {
+		return "", fmt.Sprintf("command %q not found in restricted PATH", command)
+	}
+
+	// Check if the base name is in the allowlist. Allowlist entries should be
+	// bare command names per spec §3.2, but we defensively apply filepath.Base
+	// to handle entries like "/usr/bin/echo" gracefully.
+	// Base-name comparison is safe here because absResolved was found exclusively
+	// within restrictedPATH directories above — no untrusted paths can match.
+	baseName := filepath.Base(absResolved)
+	// Linux and other Unix-like systems (FreeBSD, etc.) are case-sensitive;
+	// macOS (darwin) and Windows are case-insensitive.
+	caseSensitive := runtime.GOOS != "windows" && runtime.GOOS != "darwin"
+
+	for _, allowed := range allowlist {
+		allowedBase := filepath.Base(allowed)
+		if caseSensitive {
+			if baseName == allowedBase {
+				return absResolved, ""
+			}
+		} else {
+			if strings.EqualFold(baseName, allowedBase) {
+				return absResolved, ""
+			}
+		}
+	}
+
+	return "", fmt.Sprintf("command %q is not in the allowlist", command)
+}
+
+func commandExecFunc(workspaceRoot string, maxOutputBytes int, allowlist []string) matter.ToolExecuteFunc {
 	return func(ctx context.Context, input map[string]any) (matter.ToolResult, error) {
 		command, ok := input["command"].(string)
 		if !ok || command == "" {
@@ -64,32 +132,51 @@ func commandExecFunc(workspaceRoot string, maxOutputBytes int) matter.ToolExecut
 			}
 		}
 
-		// Resolve relative command paths against workspace root.
-		if !filepath.IsAbs(command) && (strings.HasPrefix(command, "./") || strings.HasPrefix(command, "../") || strings.ContainsAny(command, `/\`)) {
-			joined := filepath.Clean(filepath.Join(workspaceRoot, command))
-			absJoined, err := filepath.Abs(joined)
-			if err != nil {
-				return matter.ToolResult{Error: fmt.Sprintf("failed to resolve command path: %s", err)}, nil
+		// Enforce allowlist before any command execution.
+		// With an allowlist, commands are resolved exclusively against restrictedPATH
+		// directories via isCommandAllowed (no host PATH involved).
+		if len(allowlist) > 0 {
+			resolvedCmd, errMsg := isCommandAllowed(command, allowlist)
+			if errMsg != "" {
+				return matter.ToolResult{Error: errMsg}, nil
 			}
-			absRoot, err := filepath.Abs(workspaceRoot)
-			if err != nil {
-				return matter.ToolResult{Error: fmt.Sprintf("failed to resolve workspace root: %s", err)}, nil
+			command = resolvedCmd
+		} else {
+			// No allowlist — v1 backward compatibility. Bare commands are resolved
+			// by exec.CommandContext using the host PATH. The child process still
+			// runs with restrictedPATH in its environment. Users who need stricter
+			// resolution should configure an allowlist.
+			if !filepath.IsAbs(command) && (strings.HasPrefix(command, "./") || strings.HasPrefix(command, "../") || strings.ContainsAny(command, `/\`)) {
+				joined := filepath.Clean(filepath.Join(workspaceRoot, command))
+				absJoined, err := filepath.Abs(joined)
+				if err != nil {
+					return matter.ToolResult{Error: fmt.Sprintf("failed to resolve command path: %s", err)}, nil
+				}
+				absRoot, err := filepath.Abs(workspaceRoot)
+				if err != nil {
+					return matter.ToolResult{Error: fmt.Sprintf("failed to resolve workspace root: %s", err)}, nil
+				}
+				rel, err := filepath.Rel(absRoot, absJoined)
+				if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					return matter.ToolResult{Error: "command path escapes workspace"}, nil
+				}
+				command = absJoined
 			}
-			rel, err := filepath.Rel(absRoot, absJoined)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return matter.ToolResult{Error: "command path escapes workspace"}, nil
-			}
-			command = absJoined
 		}
 
 		cmd := exec.CommandContext(ctx, command, args...)
 		cmd.Dir = workspaceRoot
 
 		// Restrict environment to avoid leaking host credentials.
+		// TMPDIR is scoped to the workspace to prevent host path leakage.
+		sandboxTmp := filepath.Join(workspaceRoot, ".tmp")
+		if mkErr := os.MkdirAll(sandboxTmp, 0o700); mkErr != nil {
+			return matter.ToolResult{Error: fmt.Sprintf("failed to create sandbox temp dir: %s", mkErr)}, nil
+		}
 		cmd.Env = []string{
-			"PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+			"PATH=" + restrictedPATH,
 			"HOME=" + workspaceRoot,
-			"TMPDIR=" + os.TempDir(),
+			"TMPDIR=" + sandboxTmp,
 		}
 
 		// Close stdin immediately — no interactive input.

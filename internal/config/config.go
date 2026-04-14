@@ -73,6 +73,7 @@ type ToolsConfig struct {
 	EnableWorkspaceWrite   bool     `yaml:"enable_workspace_write"`
 	EnableWebFetch         bool     `yaml:"enable_web_fetch"`
 	EnableCommandExec      bool     `yaml:"enable_command_exec"`
+	CommandAllowlist       []string `yaml:"command_allowlist"`
 	WebFetchAllowedDomains []string `yaml:"web_fetch_allowed_domains"`
 	AllowedHiddenPaths     []string `yaml:"allowed_hidden_paths"`
 }
