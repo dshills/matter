@@ -17,6 +17,7 @@ import (
 	"github.com/dshills/matter/internal/policy"
 	"github.com/dshills/matter/internal/tools"
 	"github.com/dshills/matter/internal/tools/builtin"
+	mcppkg "github.com/dshills/matter/internal/tools/mcp"
 	"github.com/dshills/matter/pkg/matter"
 )
 
@@ -96,6 +97,14 @@ func (r *Runner) Run(ctx context.Context, req matter.RunRequest) matter.RunResul
 	if err := registerBuiltinTools(registry, r.cfg, abs); err != nil {
 		return matter.RunResult{Error: fmt.Errorf("registering tools: %w", err)}
 	}
+
+	// Register MCP tools from configured servers. Failures are non-fatal —
+	// the run proceeds with whatever tools were successfully registered.
+	// MCP clients are created per-run (not shared across runs) to ensure
+	// isolation: MCP servers may hold stateful tool context (caches, cursors,
+	// auth sessions) that should not leak between independent tasks.
+	mcpClients := registerMCPTools(ctx, registry, r.cfg.Tools.MCPServers, r.observer)
+	defer closeMCPClients(mcpClients)
 
 	// Create fresh policy state for this run.
 	policyState := &policy.RunState{
@@ -183,7 +192,8 @@ func (r *Runner) SetProgressFunc(fn matter.ProgressFunc) {
 }
 
 // Tools returns the list of tools that would be registered with the current config.
-// Uses "." as the workspace root for display purposes.
+// Uses "." as the workspace root for display purposes. Does not include MCP tools
+// because MCP servers are not started for this introspection-only method.
 func (r *Runner) Tools() []matter.Tool {
 	registry := tools.NewRegistry()
 	_ = registerBuiltinTools(registry, r.cfg, ".")
@@ -227,4 +237,73 @@ func registerBuiltinTools(reg *tools.Registry, cfg config.Config, workspace stri
 	}
 
 	return nil
+}
+
+// registerMCPTools connects to configured MCP servers, discovers their tools,
+// and registers them in the registry. Returns the list of active MCP clients
+// for cleanup. Individual server failures are logged but non-fatal — the run
+// proceeds with whatever tools were successfully registered.
+//
+// Servers are connected sequentially for simplicity. Concurrent connection
+// would reduce startup latency with multiple servers but adds complexity
+// around error collection and registry thread safety. Sequential is adequate
+// for the typical 1-3 server configuration.
+func registerMCPTools(ctx context.Context, reg *tools.Registry, servers []config.MCPServerConfig, obs *observe.Observer) []*mcppkg.MCPClient {
+	if len(servers) == 0 {
+		return nil
+	}
+
+	var clients []*mcppkg.MCPClient
+
+	for _, srv := range servers {
+		client, err := connectMCPServer(ctx, reg, srv)
+		if err != nil {
+			obs.Logger.Warn(0, "runner", fmt.Sprintf("MCP server %q (%s) failed to start", srv.Name, srv.Transport), map[string]any{"error": err.Error()})
+			continue
+		}
+		obs.Logger.Info(0, "runner", fmt.Sprintf("MCP server %q registered tools", srv.Name), nil)
+		clients = append(clients, client)
+	}
+
+	return clients
+}
+
+// connectMCPServer creates a transport, discovers tools, and registers them
+// for a single MCP server configuration.
+func connectMCPServer(ctx context.Context, reg *tools.Registry, srv config.MCPServerConfig) (*mcppkg.MCPClient, error) {
+	var transport mcppkg.Transport
+	var err error
+
+	switch srv.Transport {
+	case "stdio":
+		transport, err = mcppkg.NewStdioTransport(srv.Command, srv.Args, srv.Env)
+	case "sse":
+		transport, err = mcppkg.NewSSETransport(ctx, srv.URL)
+	default:
+		return nil, fmt.Errorf("unsupported transport %q", srv.Transport)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("creating transport: %w", err)
+	}
+
+	registerFn := func(tool matter.Tool) error {
+		return reg.Register(tool)
+	}
+
+	client, err := mcppkg.DiscoverAndRegister(ctx, srv.Name, transport, srv.Timeout, registerFn)
+	if err != nil {
+		return nil, err
+	}
+
+	return client, nil
+}
+
+// closeMCPClients shuts down all active MCP clients. Called via defer
+// after a run completes. Close errors are intentionally ignored — the
+// run result is already determined and the subprocess/connection will
+// be cleaned up by the OS on process exit if Close fails.
+func closeMCPClients(clients []*mcppkg.MCPClient) {
+	for _, c := range clients {
+		_ = c.Close()
+	}
 }

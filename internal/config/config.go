@@ -71,13 +71,25 @@ type LLMConfig struct {
 
 // ToolsConfig controls which tool categories are enabled.
 type ToolsConfig struct {
-	EnableWorkspaceRead    bool     `yaml:"enable_workspace_read"`
-	EnableWorkspaceWrite   bool     `yaml:"enable_workspace_write"`
-	EnableWebFetch         bool     `yaml:"enable_web_fetch"`
-	EnableCommandExec      bool     `yaml:"enable_command_exec"`
-	CommandAllowlist       []string `yaml:"command_allowlist"`
-	WebFetchAllowedDomains []string `yaml:"web_fetch_allowed_domains"`
-	AllowedHiddenPaths     []string `yaml:"allowed_hidden_paths"`
+	EnableWorkspaceRead    bool              `yaml:"enable_workspace_read"`
+	EnableWorkspaceWrite   bool              `yaml:"enable_workspace_write"`
+	EnableWebFetch         bool              `yaml:"enable_web_fetch"`
+	EnableCommandExec      bool              `yaml:"enable_command_exec"`
+	CommandAllowlist       []string          `yaml:"command_allowlist"`
+	WebFetchAllowedDomains []string          `yaml:"web_fetch_allowed_domains"`
+	AllowedHiddenPaths     []string          `yaml:"allowed_hidden_paths"`
+	MCPServers             []MCPServerConfig `yaml:"mcp_servers"`
+}
+
+// MCPServerConfig configures an external MCP tool server.
+type MCPServerConfig struct {
+	Name      string            `yaml:"name"`
+	Transport string            `yaml:"transport"` // "stdio" or "sse"
+	Command   string            `yaml:"command"`   // stdio only
+	Args      []string          `yaml:"args"`      // stdio only
+	URL       string            `yaml:"url"`       // sse only
+	Env       map[string]string `yaml:"env"`       // stdio only: additional env vars
+	Timeout   time.Duration     `yaml:"timeout"`   // per-tool timeout override
 }
 
 // SandboxConfig controls resource limits for command execution.
