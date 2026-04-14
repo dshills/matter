@@ -17,17 +17,18 @@ import (
 
 // Agent orchestrates a single run: plan → policy → execute → store → check limits.
 type Agent struct {
-	cfg       config.Config
-	llmClient llm.Client
-	planner   *planner.Planner
-	executor  *tools.Executor
-	registry  *tools.Registry
-	memory    *memory.Manager
-	policy    policy.Checker
-	observer  *observe.Observer
-	session   *observe.RunSession
-	metrics   RunMetrics
-	detector  *LoopDetector
+	cfg        config.Config
+	llmClient  llm.Client
+	planner    *planner.Planner
+	executor   *tools.Executor
+	registry   *tools.Registry
+	memory     *memory.Manager
+	policy     policy.Checker
+	observer   *observe.Observer
+	session    *observe.RunSession
+	metrics    RunMetrics
+	detector   *LoopDetector
+	progressFn matter.ProgressFunc
 }
 
 // New creates an agent with the given configuration and dependencies.
@@ -62,7 +63,7 @@ func (a *Agent) Run(ctx context.Context, req matter.RunRequest) matter.RunResult
 
 	runID := fmt.Sprintf("run-%d", time.Now().UnixNano())
 	if a.observer != nil {
-		a.session = a.observer.StartRun(runID, req.Task, a.cfg)
+		a.session = a.observer.StartRun(runID, req.Task, a.cfg, a.progressFn)
 	}
 
 	// Seed memory with the system prompt and user task.
@@ -103,6 +104,12 @@ func (a *Agent) Run(ctx context.Context, req matter.RunRequest) matter.RunResult
 // SetObserver attaches an observer for logging, tracing, metrics, and recording.
 func (a *Agent) SetObserver(obs *observe.Observer) {
 	a.observer = obs
+}
+
+// SetProgressFunc registers a progress callback for real-time events.
+// Must be called before Run.
+func (a *Agent) SetProgressFunc(fn matter.ProgressFunc) {
+	a.progressFn = fn
 }
 
 // Metrics returns the current run metrics.

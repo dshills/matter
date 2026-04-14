@@ -22,9 +22,10 @@ import (
 // Runner is the top-level entry point for executing matter agent runs.
 // Create one via New, then call Run for each task.
 type Runner struct {
-	llmClient llm.Client
-	observer  *observe.Observer
-	cfg       config.Config
+	llmClient  llm.Client
+	observer   *observe.Observer
+	cfg        config.Config
+	progressFn matter.ProgressFunc
 }
 
 // New creates a Runner with validated config and initialized shared subsystems.
@@ -90,8 +91,19 @@ func (r *Runner) Run(ctx context.Context, req matter.RunRequest) matter.RunResul
 		return matter.RunResult{Error: err}
 	}
 	ag.SetObserver(r.observer)
+	if r.progressFn != nil {
+		ag.SetProgressFunc(r.progressFn)
+	}
 
 	return ag.Run(ctx, req)
+}
+
+// SetProgressFunc registers a callback for real-time progress events.
+// Must be called before Run. Not safe for concurrent use — this is a
+// configuration method, not a runtime method. Callers must not call
+// SetProgressFunc concurrently with Run (same pattern as http.Server).
+func (r *Runner) SetProgressFunc(fn matter.ProgressFunc) {
+	r.progressFn = fn
 }
 
 // Tools returns the list of tools that would be registered with the current config.

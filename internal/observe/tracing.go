@@ -9,10 +9,12 @@ import (
 type EventType string
 
 const (
+	EventRunStarted       EventType = "run_started"
 	EventPlannerStarted   EventType = "planner_started"
 	EventPlannerCompleted EventType = "planner_completed"
 	EventToolStarted      EventType = "tool_started"
 	EventToolCompleted    EventType = "tool_completed"
+	EventPlannerFailed    EventType = "planner_failed"
 	EventRetry            EventType = "retry"
 	EventSummaryGenerated EventType = "summary_generated"
 	EventLimitExceeded    EventType = "limit_exceeded"

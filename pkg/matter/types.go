@@ -88,3 +88,20 @@ type RunResult struct {
 	Success      bool
 	Error        error
 }
+
+// ProgressEvent describes a step-level event during a run.
+type ProgressEvent struct {
+	RunID     string         `json:"run_id"`
+	Step      int            `json:"step"`
+	Event     string         `json:"event"` // "run_started", "planner_started", "planner_completed", "planner_failed", "tool_started", "tool_completed", "limit_exceeded", "run_completed"
+	Data      map[string]any `json:"data"`
+	Timestamp time.Time      `json:"timestamp"`
+}
+
+// ProgressFunc is called synchronously for each step-level event during a run.
+// The agent loop is intentionally suspended until the callback returns (per
+// spec §4.2) so consumers see events in strict order. Implementations should
+// return within 500ms; callbacks exceeding this are not terminated but will
+// trigger a warning log. Panics are recovered and logged without affecting
+// the run. Asynchronous dispatch is the caller's responsibility if needed.
+type ProgressFunc func(event ProgressEvent)

@@ -106,12 +106,12 @@ func cmdRun(args []string) int {
 		return exitConfigErr
 	}
 
+	// Register progress callback for CLI stderr output.
+	r.SetProgressFunc(cliProgressFunc(*workspace))
+
 	// Set up signal handling for graceful cancellation.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-
-	fmt.Fprintf(os.Stderr, "Starting task: %s\n", *task)
-	fmt.Fprintf(os.Stderr, "Workspace: %s\n\n", *workspace)
 
 	result := r.Run(ctx, matter.RunRequest{
 		Task:      *task,
@@ -243,6 +243,42 @@ func loadConfig(path string) (config.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// cliProgressFunc returns a ProgressFunc that prints progress to stderr.
+func cliProgressFunc(workspace string) matter.ProgressFunc {
+	return func(e matter.ProgressEvent) {
+		switch e.Event {
+		case "run_started":
+			fmt.Fprintf(os.Stderr, "Run %s started\n", e.RunID)
+			if task, ok := e.Data["task"].(string); ok {
+				fmt.Fprintf(os.Stderr, "Task: %s\n", task)
+			}
+			fmt.Fprintf(os.Stderr, "Workspace: %s\n\n", workspace)
+		case "planner_started":
+			fmt.Fprintf(os.Stderr, "  [step %d] planning...\n", e.Step)
+		case "planner_completed":
+			fmt.Fprintf(os.Stderr, "  [step %d] planner responded (tokens: %v, cost: $%v)\n",
+				e.Step, e.Data["tokens"], e.Data["cost"])
+		case "planner_failed":
+			fmt.Fprintf(os.Stderr, "  [step %d] planner failed: %v\n", e.Step, e.Data["error"])
+		case "tool_started":
+			fmt.Fprintf(os.Stderr, "  [step %d] calling tool: %v\n", e.Step, e.Data["tool"])
+		case "tool_completed":
+			if errMsg, ok := e.Data["error"].(string); ok && errMsg != "" {
+				fmt.Fprintf(os.Stderr, "  [step %d] tool %v failed (%v): %s\n",
+					e.Step, e.Data["tool"], e.Data["duration"], errMsg)
+			} else {
+				fmt.Fprintf(os.Stderr, "  [step %d] tool %v completed (%v)\n",
+					e.Step, e.Data["tool"], e.Data["duration"])
+			}
+		case "limit_exceeded":
+			fmt.Fprintf(os.Stderr, "  [step %d] limit exceeded: %v — %v\n",
+				e.Step, e.Data["limit"], e.Data["message"])
+		case "run_completed":
+			fmt.Fprintf(os.Stderr, "\nCompleted: %v (%d steps)\n", e.Data["success"], e.Step)
+		}
+	}
 }
 
 // printResult writes the run result to stdout as JSON.

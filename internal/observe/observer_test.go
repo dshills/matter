@@ -173,7 +173,7 @@ func TestObserverStartAndEndRun(t *testing.T) {
 	cfg := testObserverCfg()
 	obs := NewObserver(cfg, &buf)
 
-	session := obs.StartRun("run-42", "test task", config.DefaultConfig())
+	session := obs.StartRun("run-42", "test task", config.DefaultConfig(), nil)
 
 	// Should have logged the start.
 	if !strings.Contains(buf.String(), "run started") {
@@ -203,7 +203,7 @@ func TestObserverStartAndEndRun(t *testing.T) {
 func TestObserverPlannerEvents(t *testing.T) {
 	var buf bytes.Buffer
 	obs := NewObserver(testObserverCfg(), &buf)
-	session := obs.StartRun("run-1", "test", config.DefaultConfig())
+	session := obs.StartRun("run-1", "test", config.DefaultConfig(), nil)
 
 	session.PlannerStarted(1)
 	session.PlannerCompleted(1, 200, 0.01, 500*time.Millisecond)
@@ -220,7 +220,7 @@ func TestObserverPlannerEvents(t *testing.T) {
 func TestObserverToolEvents(t *testing.T) {
 	var buf bytes.Buffer
 	obs := NewObserver(testObserverCfg(), &buf)
-	session := obs.StartRun("run-1", "test", config.DefaultConfig())
+	session := obs.StartRun("run-1", "test", config.DefaultConfig(), nil)
 
 	session.ToolStarted(1, "read")
 	session.ToolCompleted(1, "read", 100*time.Millisecond, "")
@@ -245,8 +245,8 @@ func TestConcurrentRunSessions(t *testing.T) {
 	obs := NewObserver(testObserverCfg(), &buf)
 
 	// Start two concurrent sessions from the same observer.
-	s1 := obs.StartRun("run-a", "task a", config.DefaultConfig())
-	s2 := obs.StartRun("run-b", "task b", config.DefaultConfig())
+	s1 := obs.StartRun("run-a", "task a", config.DefaultConfig(), nil)
+	s2 := obs.StartRun("run-b", "task b", config.DefaultConfig(), nil)
 
 	// Each session has its own tracer.
 	s1.PlannerStarted(1)
@@ -256,11 +256,12 @@ func TestConcurrentRunSessions(t *testing.T) {
 
 	e1 := s1.Tracer().Events()
 	e2 := s2.Tracer().Events()
-	if len(e1) != 2 {
-		t.Errorf("session 1 events = %d, want 2", len(e1))
+	// 3 events each: run_started + planner_started + planner_completed
+	if len(e1) != 3 {
+		t.Errorf("session 1 events = %d, want 3", len(e1))
 	}
-	if len(e2) != 2 {
-		t.Errorf("session 2 events = %d, want 2", len(e2))
+	if len(e2) != 3 {
+		t.Errorf("session 2 events = %d, want 3", len(e2))
 	}
 	if e1[0].RunID != "run-a" {
 		t.Errorf("session 1 run_id = %q, want run-a", e1[0].RunID)
