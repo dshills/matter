@@ -15,6 +15,7 @@ func DefaultConfig() Config {
 			MaxConsecutiveErrors:     3,
 			MaxRepeatedToolCalls:     2,
 			MaxConsecutiveNoProgress: 3,
+			MaxAsks:                  3,
 		},
 		Memory: MemoryConfig{
 			RecentMessages:         10,

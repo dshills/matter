@@ -85,20 +85,7 @@ func (a *Agent) Run(ctx context.Context, req matter.RunRequest) matter.RunResult
 		return matter.RunResult{Error: fmt.Errorf("failed to seed task message: %w", err)}
 	}
 
-	// Enter the step loop.
-	result := a.loop(ctx, req)
-
-	// Populate final metrics.
-	result.Steps = a.metrics.Steps
-	result.TotalTokens = a.metrics.TotalTokens
-	result.TotalCostUSD = a.metrics.CostUSD
-
-	if a.session != nil {
-		duration := time.Since(a.metrics.StartTime)
-		a.session.EndRun(result.Success, result.FinalSummary, a.metrics.Steps, duration, a.metrics.TotalTokens, a.metrics.CostUSD)
-	}
-
-	return result
+	return a.finalizeRun(a.loop(ctx, req))
 }
 
 // SetObserver attaches an observer for logging, tracing, metrics, and recording.
@@ -110,6 +97,43 @@ func (a *Agent) SetObserver(obs *observe.Observer) {
 // Must be called before Run.
 func (a *Agent) SetProgressFunc(fn matter.ProgressFunc) {
 	a.progressFn = fn
+}
+
+// ResumeWithAnswer adds the user's answer to memory and re-enters the agent loop.
+// Called by the runner after a paused run is resumed.
+func (a *Agent) ResumeWithAnswer(ctx context.Context, req matter.RunRequest, answer string, pausedDuration time.Duration) matter.RunResult {
+	// Account for time spent paused.
+	a.metrics.PausedDuration += pausedDuration
+
+	// Add the user's answer to memory.
+	answerMsg := matter.Message{
+		Role:      matter.RoleUser,
+		Content:   answer,
+		Timestamp: time.Now(),
+		Step:      a.metrics.Steps,
+	}
+	if err := a.memory.Add(ctx, answerMsg); err != nil {
+		return a.finalizeRun(matter.RunResult{
+			Error: fmt.Errorf("failed to store answer message: %w", err),
+		})
+	}
+
+	return a.finalizeRun(a.loop(ctx, req))
+}
+
+// finalizeRun populates metrics on the result and ends the observer session
+// (unless the run is paused and will be resumed later).
+func (a *Agent) finalizeRun(result matter.RunResult) matter.RunResult {
+	result.Steps = a.metrics.Steps
+	result.TotalTokens = a.metrics.TotalTokens
+	result.TotalCostUSD = a.metrics.CostUSD
+
+	if a.session != nil && !result.Paused {
+		duration := time.Since(a.metrics.StartTime) - a.metrics.PausedDuration
+		a.session.EndRun(result.Success, result.FinalSummary, a.metrics.Steps, duration, a.metrics.TotalTokens, a.metrics.CostUSD)
+	}
+
+	return result
 }
 
 // Metrics returns the current run metrics.

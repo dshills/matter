@@ -27,6 +27,13 @@ func ValidateDecision(d matter.Decision) error {
 		if d.Final == nil {
 			return fmt.Errorf("decision type is %q but final is missing", d.Type)
 		}
+	case matter.DecisionTypeAsk:
+		if d.Ask == nil {
+			return fmt.Errorf("decision type is %q but ask is missing", d.Type)
+		}
+		if d.Ask.Question == "" {
+			return fmt.Errorf("decision type is %q but ask.question is empty", d.Type)
+		}
 	default:
 		return fmt.Errorf("invalid decision type: %q", d.Type)
 	}

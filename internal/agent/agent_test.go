@@ -24,9 +24,20 @@ func testConfig() config.Config {
 	cfg.Agent.MaxConsecutiveErrors = 3
 	cfg.Agent.MaxRepeatedToolCalls = 2
 	cfg.Agent.MaxConsecutiveNoProgress = 3
+	cfg.Agent.MaxAsks = 3
 	cfg.Memory.SummarizeAfterMessages = 100 // high to avoid triggering
 	cfg.Memory.SummarizeAfterTokens = 100000
 	return cfg
+}
+
+func askDecision(question string, options ...string) string {
+	d := matter.Decision{
+		Type:      matter.DecisionTypeAsk,
+		Reasoning: "need clarification",
+		Ask:       &matter.AskRequest{Question: question, Options: options},
+	}
+	b, _ := json.Marshal(d)
+	return string(b)
 }
 
 func completeDecision(summary string) string {
@@ -253,6 +264,88 @@ func TestAgentUnknownTool(t *testing.T) {
 
 	if !result.Success {
 		t.Errorf("expected recovery from unknown tool, got error: %v", result.Error)
+	}
+}
+
+// TestAgentAskPausesRun verifies that an ask decision pauses the run.
+func TestAgentAskPausesRun(t *testing.T) {
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: askDecision("Which file?", "a.txt", "b.txt"), TotalTokens: 100},
+	}, nil)
+
+	a := setupAgent(testConfig(), mock, echoTool())
+	result := a.Run(context.Background(), matter.RunRequest{Task: "ambiguous task"})
+
+	if !result.Paused {
+		t.Error("expected run to be paused")
+	}
+	if result.Question == nil {
+		t.Fatal("expected question to be set")
+	}
+	if result.Question.Question != "Which file?" {
+		t.Errorf("question = %q, want 'Which file?'", result.Question.Question)
+	}
+	if len(result.Question.Options) != 2 {
+		t.Errorf("options = %d, want 2", len(result.Question.Options))
+	}
+	if result.Steps != 1 {
+		t.Errorf("steps = %d, want 1 (ask counts as a step)", result.Steps)
+	}
+}
+
+// TestAgentAskThenResume verifies a pause/resume/complete cycle.
+func TestAgentAskThenResume(t *testing.T) {
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: askDecision("Which file?"), TotalTokens: 100},
+		{Content: completeDecision("used a.txt"), TotalTokens: 80},
+	}, nil)
+
+	a := setupAgent(testConfig(), mock, echoTool())
+	result := a.Run(context.Background(), matter.RunRequest{Task: "read file"})
+
+	if !result.Paused {
+		t.Fatal("expected paused")
+	}
+
+	// Resume with answer.
+	result = a.ResumeWithAnswer(context.Background(), matter.RunRequest{Task: "read file"}, "a.txt", 0)
+
+	if result.Paused {
+		t.Error("expected run to complete, not pause again")
+	}
+	if !result.Success {
+		t.Errorf("expected success, got error: %v", result.Error)
+	}
+	if result.FinalSummary != "used a.txt" {
+		t.Errorf("summary = %q, want 'used a.txt'", result.FinalSummary)
+	}
+	if result.Steps != 2 {
+		t.Errorf("steps = %d, want 2", result.Steps)
+	}
+	if result.TotalTokens != 180 {
+		t.Errorf("total tokens = %d, want 180", result.TotalTokens)
+	}
+}
+
+// TestAgentAskDisabledMaxAsksZero verifies that ask decisions are treated as
+// planner errors when max_asks is 0.
+func TestAgentAskDisabledMaxAsksZero(t *testing.T) {
+	cfg := testConfig()
+	cfg.Agent.MaxAsks = 0
+
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: askDecision("Which file?"), TotalTokens: 100},
+		{Content: completeDecision("recovered"), TotalTokens: 80},
+	}, nil)
+
+	a := setupAgent(cfg, mock, echoTool())
+	result := a.Run(context.Background(), matter.RunRequest{Task: "ask disabled"})
+
+	if result.Paused {
+		t.Error("run should not pause when max_asks=0")
+	}
+	if !result.Success {
+		t.Errorf("expected recovery after ask error, got: %v", result.Error)
 	}
 }
 

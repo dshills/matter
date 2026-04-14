@@ -111,6 +111,32 @@ func TestEvaluateLimitsMaxConsecutiveNoProgress(t *testing.T) {
 	}
 }
 
+// max_asks is enforced in handleAsk, not EvaluateLimits, so that the agent
+// can always process the answer to its last allowed question.
+func TestEvaluateLimitsMaxAsksNotCheckedHere(t *testing.T) {
+	cfg := testAgentConfig()
+	cfg.MaxAsks = 3
+	m := RunMetrics{StartTime: time.Now(), AskCount: 100}
+	lc := EvaluateLimits(cfg, m)
+	if lc.Exceeded && lc.Limit == "max_asks" {
+		t.Error("max_asks should not be checked in EvaluateLimits")
+	}
+}
+
+func TestEvaluateLimitsPausedDurationExcluded(t *testing.T) {
+	cfg := testAgentConfig()
+	cfg.MaxDuration = 2 * time.Minute
+	// Start 3 minutes ago, but 2 minutes were paused → only 1 minute active.
+	m := RunMetrics{
+		StartTime:      time.Now().Add(-3 * time.Minute),
+		PausedDuration: 2 * time.Minute,
+	}
+	lc := EvaluateLimits(cfg, m)
+	if lc.Exceeded && lc.Limit == "max_duration" {
+		t.Error("paused duration should be excluded from max_duration check")
+	}
+}
+
 // TestEvaluateLimitsOrder verifies that when multiple limits are exceeded,
 // the first in spec order wins.
 func TestEvaluateLimitsOrder(t *testing.T) {

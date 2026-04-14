@@ -31,6 +31,7 @@ const (
 	DecisionTypeTool     DecisionType = "tool"
 	DecisionTypeComplete DecisionType = "complete"
 	DecisionTypeFail     DecisionType = "fail"
+	DecisionTypeAsk      DecisionType = "ask"
 )
 
 // Decision represents a parsed planner output.
@@ -39,6 +40,13 @@ type Decision struct {
 	Reasoning string       `json:"reasoning"`
 	ToolCall  *ToolCall    `json:"tool_call,omitempty"`
 	Final     *FinalAnswer `json:"final,omitempty"`
+	Ask       *AskRequest  `json:"ask,omitempty"`
+}
+
+// AskRequest represents a question the agent needs answered before proceeding.
+type AskRequest struct {
+	Question string   `json:"question"`
+	Options  []string `json:"options,omitempty"`
 }
 
 // ToolCall represents a request to invoke a registered tool.
@@ -87,6 +95,8 @@ type RunResult struct {
 	TotalCostUSD float64
 	Success      bool
 	Error        error
+	Paused       bool        // true if the run is waiting for user input
+	Question     *AskRequest // set when Paused is true
 }
 
 // ProgressEvent describes a step-level event during a run.

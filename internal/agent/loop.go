@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -60,8 +61,10 @@ func (a *Agent) step(ctx context.Context, req matter.RunRequest) (matter.RunResu
 		MaxTotalTokens: a.cfg.Agent.MaxTotalTokens,
 		CostUsed:       a.metrics.CostUSD,
 		MaxCostUSD:     a.cfg.Agent.MaxCostUSD,
-		TimeElapsed:    time.Since(a.metrics.StartTime),
+		TimeElapsed:    time.Since(a.metrics.StartTime) - a.metrics.PausedDuration,
 		MaxDuration:    a.cfg.Agent.MaxDuration,
+		AsksUsed:       a.metrics.AskCount,
+		MaxAsks:        a.cfg.Agent.MaxAsks,
 	}
 
 	// Call planner.
@@ -116,6 +119,9 @@ func (a *Agent) step(ctx context.Context, req matter.RunRequest) (matter.RunResu
 
 	case matter.DecisionTypeTool:
 		return a.executeTool(ctx, decision)
+
+	case matter.DecisionTypeAsk:
+		return a.handleAsk(ctx, decision)
 	}
 
 	return matter.RunResult{
@@ -206,6 +212,66 @@ func (a *Agent) executeTool(ctx context.Context, decision matter.Decision) (matt
 	a.updateProgress(decision, &rec.Result, nil)
 
 	return matter.RunResult{}, false
+}
+
+// handleAsk processes an ask decision: stores it in memory, increments ask
+// counter, and returns a paused result. If max_asks is 0, ask is treated as
+// a planner error (conversation mode disabled).
+func (a *Agent) handleAsk(ctx context.Context, decision matter.Decision) (matter.RunResult, bool) {
+	if a.cfg.Agent.MaxAsks == 0 {
+		return a.handleError(ctx,
+			NewPlannerError("ask decision received but conversation mode is disabled (max_asks=0)", nil), nil)
+	}
+
+	ask := decision.Ask
+	if ask == nil {
+		return a.handleError(ctx,
+			NewPlannerError("ask decision missing ask field", nil), nil)
+	}
+
+	// Check ask budget before pausing, so the agent can always process
+	// the answer to its last allowed question. handleError stores the
+	// rejection message in memory so the LLM knows its ask was denied
+	// and can proceed without retrying.
+	if a.cfg.Agent.MaxAsks > 0 && a.metrics.AskCount >= a.cfg.Agent.MaxAsks {
+		return a.handleError(ctx,
+			NewPlannerError(fmt.Sprintf("ask limit exceeded: %d/%d", a.metrics.AskCount, a.cfg.Agent.MaxAsks), nil), nil)
+	}
+
+	// Increment ask counter.
+	a.metrics.AskCount++
+
+	// Store the full decision in memory so the LLM sees the question, reasoning,
+	// and options in context — matching the schema it produces.
+	askData, err := json.Marshal(decision)
+	if err != nil {
+		return matter.RunResult{Error: fmt.Errorf("failed to marshal ask decision: %w", err)}, true
+	}
+	// a.metrics.Steps was already incremented at the start of step(),
+	// so this correctly reflects the current step number.
+	askMsg := matter.Message{
+		Role:      matter.RolePlanner,
+		Content:   string(askData),
+		Timestamp: time.Now(),
+		Step:      a.metrics.Steps,
+	}
+	if err := a.memory.Add(ctx, askMsg); err != nil {
+		return matter.RunResult{Error: fmt.Errorf("failed to store ask message: %w", err)}, true
+	}
+
+	// Emit run_paused progress event.
+	if a.session != nil {
+		a.session.RunPaused(a.metrics.Steps, ask.Question)
+	}
+
+	// Return paused result with current metrics populated.
+	return matter.RunResult{
+		Paused:       true,
+		Question:     ask,
+		Steps:        a.metrics.Steps,
+		TotalTokens:  a.metrics.TotalTokens,
+		TotalCostUSD: a.metrics.CostUSD,
+	}, true
 }
 
 // handleError processes an error from the step, updating consecutive error

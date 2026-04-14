@@ -310,6 +310,22 @@ func (s *RunSession) StepCompleted(step int) {
 	s.metrics.IncStepCount()
 }
 
+// RunPaused records a run pause event (conversation mode ask).
+func (s *RunSession) RunPaused(step int, question string) {
+	data := map[string]any{"question": question}
+
+	s.tracer.Emit(step, EventRunPaused, data)
+	s.logger.Info(step, "agent", "run paused for user input", data)
+
+	s.invokeProgress(matter.ProgressEvent{
+		RunID:     s.runID,
+		Step:      step,
+		Event:     string(EventRunPaused),
+		Data:      data,
+		Timestamp: time.Now(),
+	})
+}
+
 // LimitExceeded records a limit exceeded event.
 func (s *RunSession) LimitExceeded(step int, limit, message string) {
 	data := map[string]any{

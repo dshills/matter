@@ -23,6 +23,8 @@ type BudgetInfo struct {
 	MaxCostUSD     float64
 	TimeElapsed    time.Duration
 	MaxDuration    time.Duration
+	AsksUsed       int
+	MaxAsks        int
 }
 
 // Planner produces typed decisions by delegating to an LLM client.
@@ -163,11 +165,19 @@ func (p *Planner) buildPrompt(task, toolSchemas string, budget BudgetInfo) strin
 	if budget.MaxDuration > 0 {
 		fmt.Fprintf(&b, "- Time: %s / %s\n", budget.TimeElapsed.Round(time.Second), budget.MaxDuration.Round(time.Second))
 	}
+	if budget.MaxAsks > 0 {
+		fmt.Fprintf(&b, "- Asks: %d / %d\n", budget.AsksUsed, budget.MaxAsks)
+	}
 	b.WriteString("\n")
 
 	// Instructions section (only for default prompt path).
 	if p.cfg.SystemPrompt == "" && p.resolvedPrompt == "" {
 		b.WriteString(defaultInstructions)
+		if budget.MaxAsks > 0 {
+			b.WriteString("\n")
+			b.WriteString("- Ask the user only when the task is genuinely ambiguous. Do not ask for confirmation of routine actions.\n")
+			b.WriteString("- Use options when the question has a small number of likely answers.\n")
+		}
 		b.WriteString("\n")
 		if p.cfg.PromptSuffix != "" {
 			b.WriteString("\n")
@@ -184,7 +194,12 @@ func (p *Planner) buildPrompt(task, toolSchemas string, budget BudgetInfo) strin
 	b.WriteString(`Complete: {"type":"complete","reasoning":"...","final":{"summary":"..."}}`)
 	b.WriteString("\n")
 	b.WriteString(`Fail: {"type":"fail","reasoning":"...","final":{"summary":"..."}}`)
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if budget.MaxAsks > 0 {
+		b.WriteString(`Ask: {"type":"ask","reasoning":"...","ask":{"question":"...","options":["A","B"]}}`)
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 	b.WriteString("Return ONLY the JSON object with no markdown fences or explanation.\n")
 
 	return b.String()

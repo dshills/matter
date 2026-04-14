@@ -42,6 +42,7 @@ type AgentConfig struct {
 	MaxConsecutiveErrors     int           `yaml:"max_consecutive_errors"`
 	MaxRepeatedToolCalls     int           `yaml:"max_repeated_tool_calls"`
 	MaxConsecutiveNoProgress int           `yaml:"max_consecutive_no_progress"`
+	MaxAsks                  int           `yaml:"max_asks"`
 }
 
 // MemoryConfig controls context management.
@@ -139,6 +140,9 @@ func ApplyEnv(cfg Config) (Config, error) {
 		return cfg, err
 	}
 	if cfg.Agent.MaxConsecutiveNoProgress, err = envInt("MATTER_AGENT_MAX_CONSECUTIVE_NO_PROGRESS", cfg.Agent.MaxConsecutiveNoProgress); err != nil {
+		return cfg, err
+	}
+	if cfg.Agent.MaxAsks, err = envInt("MATTER_AGENT_MAX_ASKS", cfg.Agent.MaxAsks); err != nil {
 		return cfg, err
 	}
 	if cfg.Memory.RecentMessages, err = envInt("MATTER_MEMORY_RECENT_MESSAGES", cfg.Memory.RecentMessages); err != nil {

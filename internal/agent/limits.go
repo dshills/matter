@@ -18,6 +18,8 @@ type RunMetrics struct {
 	ConsecutiveErrors  int
 	ConsecutiveNoProg  int
 	RepeatedToolDetect bool // set by loop detector
+	AskCount           int
+	PausedDuration     time.Duration // total time spent paused (excluded from duration limit)
 }
 
 // LimitCheck identifies which limit was exceeded.
@@ -39,9 +41,9 @@ func EvaluateLimits(cfg config.AgentConfig, m RunMetrics) LimitCheck {
 		}
 	}
 
-	// 2. max_duration
-	elapsed := time.Since(m.StartTime)
-	if elapsed >= cfg.MaxDuration {
+	// 2. max_duration (excludes time spent paused for user input)
+	elapsed := time.Since(m.StartTime) - m.PausedDuration
+	if cfg.MaxDuration > 0 && elapsed >= cfg.MaxDuration {
 		return LimitCheck{
 			Exceeded: true,
 			Limit:    "max_duration",
@@ -103,7 +105,10 @@ func EvaluateLimits(cfg config.AgentConfig, m RunMetrics) LimitCheck {
 		}
 	}
 
-	// 9. max_consecutive_no_progress
+	// 9. max_asks — checked in handleAsk before pausing, not here, so the
+	// agent can always process the answer to its last allowed question.
+
+	// 10. max_consecutive_no_progress
 	if m.ConsecutiveNoProg >= cfg.MaxConsecutiveNoProgress {
 		return LimitCheck{
 			Exceeded: true,

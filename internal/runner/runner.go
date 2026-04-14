@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/dshills/matter/internal/agent"
 	"github.com/dshills/matter/internal/config"
@@ -19,13 +20,28 @@ import (
 	"github.com/dshills/matter/pkg/matter"
 )
 
+// ErrNotPaused is returned by Resume when no run is paused.
+var ErrNotPaused = fmt.Errorf("no paused run to resume")
+
+// ErrRunWhilePaused is returned by Run when a run is already paused.
+var ErrRunWhilePaused = fmt.Errorf("cannot start a new run while a run is paused")
+
 // Runner is the top-level entry point for executing matter agent runs.
 // Create one via New, then call Run for each task.
+//
+// Runner is not safe for concurrent use. The CLI executes runs sequentially,
+// and the spec (§4.3) defines a single-run-at-a-time model. If a future
+// HTTP server needs concurrency, synchronization should be added at that layer.
 type Runner struct {
 	llmClient  llm.Client
 	observer   *observe.Observer
 	cfg        config.Config
 	progressFn matter.ProgressFunc
+
+	// Pause/resume state (only one paused run at a time).
+	pausedAgent *agent.Agent
+	pausedReq   matter.RunRequest
+	pausedAt    time.Time
 }
 
 // New creates a Runner with validated config and initialized shared subsystems.
@@ -59,7 +75,12 @@ func New(cfg config.Config, llmClient llm.Client) (*Runner, error) {
 // Run executes a task and returns the result.
 // Each call creates a fresh tool registry (bound to the request's workspace),
 // policy checker, and agent to ensure isolation between runs.
+// Returns an error if a run is currently paused (call Resume first).
 func (r *Runner) Run(ctx context.Context, req matter.RunRequest) matter.RunResult {
+	if r.pausedAgent != nil {
+		return matter.RunResult{Error: ErrRunWhilePaused}
+	}
+
 	workspace := req.Workspace
 	if workspace == "" {
 		workspace = "."
@@ -95,7 +116,62 @@ func (r *Runner) Run(ctx context.Context, req matter.RunRequest) matter.RunResul
 		ag.SetProgressFunc(r.progressFn)
 	}
 
-	return ag.Run(ctx, req)
+	result := ag.Run(ctx, req)
+
+	// If the run paused, save agent state for Resume. The paused state is
+	// short-lived in CLI usage (user responds or hits EOF). For long-lived
+	// servers, callers should implement their own timeout/cleanup logic.
+	if result.Paused {
+		r.pausedAgent = ag
+		r.pausedReq = req
+		r.pausedAt = time.Now()
+	}
+
+	return result
+}
+
+// Resume continues a paused run with the user's answer.
+// Returns ErrNotPaused if no run is paused.
+func (r *Runner) Resume(ctx context.Context, answer string) matter.RunResult {
+	if r.pausedAgent == nil {
+		return matter.RunResult{Error: ErrNotPaused}
+	}
+
+	ag := r.pausedAgent
+	req := r.pausedReq
+	pausedDuration := time.Since(r.pausedAt)
+
+	// Clear paused state before resuming (agent may pause again).
+	r.pausedAgent = nil
+	r.pausedReq = matter.RunRequest{}
+	r.pausedAt = time.Time{}
+
+	result := ag.ResumeWithAnswer(ctx, req, answer, pausedDuration)
+
+	// If the run paused again, save state.
+	if result.Paused {
+		r.pausedAgent = ag
+		r.pausedReq = req
+		r.pausedAt = time.Now()
+	}
+
+	return result
+}
+
+// IsPaused returns true if a run is currently paused awaiting user input.
+func (r *Runner) IsPaused() bool {
+	return r.pausedAgent != nil
+}
+
+// Abort clears any paused run state, allowing a new Run call.
+// This is useful for callers that need to abandon a paused conversation
+// (e.g., on timeout or user disconnect). The observer session associated
+// with the aborted agent is released when the agent is garbage-collected;
+// no EndRun event is emitted for aborted runs.
+func (r *Runner) Abort() {
+	r.pausedAgent = nil
+	r.pausedReq = matter.RunRequest{}
+	r.pausedAt = time.Time{}
 }
 
 // SetProgressFunc registers a callback for real-time progress events.

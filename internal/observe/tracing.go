@@ -18,6 +18,7 @@ const (
 	EventRetry            EventType = "retry"
 	EventSummaryGenerated EventType = "summary_generated"
 	EventLimitExceeded    EventType = "limit_exceeded"
+	EventRunPaused        EventType = "run_paused"
 	EventRunCompleted     EventType = "run_completed"
 )
 

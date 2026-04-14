@@ -169,3 +169,53 @@ func TestParseDecisionMissingFinal(t *testing.T) {
 		t.Error("expected error when final is missing for type=complete")
 	}
 }
+
+func TestParseDecisionAskDirect(t *testing.T) {
+	raw := `{"type":"ask","reasoning":"need clarification","ask":{"question":"Which file?","options":["a.txt","b.txt"]}}`
+	result, err := ParseDecision(context.Background(), nil, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision.Type != matter.DecisionTypeAsk {
+		t.Errorf("type = %q, want ask", result.Decision.Type)
+	}
+	if result.Decision.Ask == nil {
+		t.Fatal("ask is nil")
+	}
+	if result.Decision.Ask.Question != "Which file?" {
+		t.Errorf("question = %q, want 'Which file?'", result.Decision.Ask.Question)
+	}
+	if len(result.Decision.Ask.Options) != 2 {
+		t.Errorf("options count = %d, want 2", len(result.Decision.Ask.Options))
+	}
+}
+
+func TestParseDecisionAskWithoutOptions(t *testing.T) {
+	raw := `{"type":"ask","reasoning":"ambiguous","ask":{"question":"What do you mean?"}}`
+	result, err := ParseDecision(context.Background(), nil, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision.Type != matter.DecisionTypeAsk {
+		t.Errorf("type = %q, want ask", result.Decision.Type)
+	}
+	if len(result.Decision.Ask.Options) != 0 {
+		t.Errorf("options should be empty, got %v", result.Decision.Ask.Options)
+	}
+}
+
+func TestParseDecisionAskMissingAskField(t *testing.T) {
+	raw := `{"type":"ask","reasoning":"test"}`
+	_, err := ParseDecision(context.Background(), nil, raw)
+	if err == nil {
+		t.Error("expected error when ask field is missing for type=ask")
+	}
+}
+
+func TestParseDecisionAskEmptyQuestion(t *testing.T) {
+	raw := `{"type":"ask","reasoning":"test","ask":{"question":""}}`
+	_, err := ParseDecision(context.Background(), nil, raw)
+	if err == nil {
+		t.Error("expected error when ask.question is empty")
+	}
+}

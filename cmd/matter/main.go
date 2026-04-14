@@ -9,12 +9,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/dshills/matter/internal/config"
@@ -117,6 +120,41 @@ func cmdRun(args []string) int {
 		Task:      *task,
 		Workspace: *workspace,
 	})
+
+	// Handle conversation mode: prompt for input when the agent asks.
+	// Use a single scanner to avoid buffering data loss across calls.
+	// Note: Scan() blocks on stdin which is standard CLI behavior. SIGINT
+	// is handled by signal.NotifyContext which terminates the process.
+	// Single-line input is sufficient for v1 CLI conversation mode.
+	// Multi-line support can be added in a future version if needed.
+	stdinScanner := bufio.NewScanner(os.Stdin)
+	stdinScanner.Buffer(make([]byte, bufio.MaxScanTokenSize), 1024*1024) // up to 1MB
+	for result.Paused {
+		if result.Question == nil {
+			fmt.Fprintln(os.Stderr, "\n(agent paused without a question, cancelling)")
+			break
+		}
+		fmt.Fprintf(os.Stderr, "\nAgent question: %s\n", result.Question.Question)
+		if len(result.Question.Options) > 0 {
+			for i, opt := range result.Question.Options {
+				fmt.Fprintf(os.Stderr, "  %d. %s\n", i+1, opt)
+			}
+		}
+		fmt.Fprint(os.Stderr, "> ")
+		answer, ok := scanLine(stdinScanner)
+		if !ok {
+			// EOF or read error — cancel the run.
+			if err := stdinScanner.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "\n(input error: %v, cancelling)\n", err)
+			} else {
+				fmt.Fprintln(os.Stderr, "\n(EOF, cancelling)")
+			}
+			break
+		}
+		// Map numeric input to option string (e.g., "1" → first option).
+		answer = resolveOption(answer, result.Question.Options)
+		result = r.Resume(ctx, answer)
+	}
 
 	// Print result to stdout as JSON.
 	printResult(result)
@@ -243,6 +281,39 @@ func loadConfig(path string) (config.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// scanLine reads the next line from the scanner, trimming whitespace.
+// TrimSpace is intentional: CLI answers are plain text where leading/trailing
+// whitespace is never significant. Returns ("", false) on EOF or error.
+// Callers should check scanner.Err() to distinguish EOF from read errors.
+func scanLine(s *bufio.Scanner) (string, bool) {
+	if s.Scan() {
+		return strings.TrimSpace(s.Text()), true
+	}
+	return "", false
+}
+
+// resolveOption maps a numeric input string to the corresponding option.
+// Exact string matches take priority over index parsing, so if an option
+// is itself a number, the user can type it literally. If no exact match
+// and the input is a valid 1-based index, returns the indexed option.
+// Otherwise returns the input unchanged.
+func resolveOption(input string, options []string) string {
+	if len(options) == 0 {
+		return input
+	}
+	// Prefer exact match over index lookup.
+	for _, opt := range options {
+		if input == opt {
+			return input
+		}
+	}
+	n, err := strconv.Atoi(input)
+	if err != nil || n < 1 || n > len(options) {
+		return input
+	}
+	return options[n-1]
 }
 
 // cliProgressFunc returns a ProgressFunc that prints progress to stderr.

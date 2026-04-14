@@ -155,6 +155,103 @@ func TestRunWithCancelledContext(t *testing.T) {
 	}
 }
 
+func TestResumeNotPaused(t *testing.T) {
+	cfg := config.DefaultConfig()
+	r, err := New(cfg, mockClient())
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	result := r.Resume(context.Background(), "some answer")
+	if result.Error == nil {
+		t.Error("expected ErrNotPaused error")
+	}
+	if result.Error != ErrNotPaused {
+		t.Errorf("error = %v, want ErrNotPaused", result.Error)
+	}
+}
+
+func TestRunWhilePaused(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	// Mock returns an ask decision to pause the run.
+	askResp := llm.Response{
+		Content:     `{"type":"ask","reasoning":"need info","ask":{"question":"Which one?"}}`,
+		TotalTokens: 10,
+	}
+	mock := llm.NewMockClient([]llm.Response{askResp}, nil)
+
+	r, err := New(cfg, mock)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	result := r.Run(context.Background(), matter.RunRequest{
+		Task:      "ambiguous",
+		Workspace: t.TempDir(),
+	})
+
+	if !result.Paused {
+		t.Fatal("expected paused run")
+	}
+	if !r.IsPaused() {
+		t.Error("IsPaused() should be true")
+	}
+
+	// Try to start a new run while paused.
+	result2 := r.Run(context.Background(), matter.RunRequest{
+		Task:      "new task",
+		Workspace: t.TempDir(),
+	})
+	if result2.Error == nil || result2.Error != ErrRunWhilePaused {
+		t.Errorf("expected ErrRunWhilePaused, got %v", result2.Error)
+	}
+}
+
+func TestPauseResumeComplete(t *testing.T) {
+	cfg := config.DefaultConfig()
+
+	askResp := llm.Response{
+		Content:     `{"type":"ask","reasoning":"need info","ask":{"question":"Which one?","options":["A","B"]}}`,
+		TotalTokens: 10,
+	}
+	completeResp := llm.Response{
+		Content:     `{"type":"complete","reasoning":"done","final":{"summary":"used A"}}`,
+		TotalTokens: 10,
+	}
+	mock := llm.NewMockClient([]llm.Response{askResp, completeResp}, nil)
+
+	r, err := New(cfg, mock)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	result := r.Run(context.Background(), matter.RunRequest{
+		Task:      "task",
+		Workspace: t.TempDir(),
+	})
+
+	if !result.Paused {
+		t.Fatal("expected paused")
+	}
+
+	// Resume with answer.
+	result = r.Resume(context.Background(), "A")
+
+	if result.Paused {
+		t.Error("expected completed, not paused")
+	}
+	if !result.Success {
+		t.Errorf("expected success, got: %v", result.Error)
+	}
+	if result.FinalSummary != "used A" {
+		t.Errorf("summary = %q, want 'used A'", result.FinalSummary)
+	}
+	if r.IsPaused() {
+		t.Error("IsPaused() should be false after completion")
+	}
+}
+
 func TestConfigReturnsEffectiveConfig(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agent.MaxSteps = 42
