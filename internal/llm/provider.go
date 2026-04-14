@@ -23,7 +23,8 @@ type ProviderFactory func(cfg ProviderConfig) (Client, error)
 
 // providers maps provider names to factories.
 var providers = map[string]ProviderFactory{
-	"mock": newMockClientFromConfig,
+	"mock":   newMockClientFromConfig,
+	"openai": newOpenAIClient,
 }
 
 // RegisterProvider adds a provider factory to the registry.
