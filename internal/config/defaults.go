@@ -55,5 +55,11 @@ func DefaultConfig() Config {
 			RecordRuns: true,
 			RecordDir:  ".matter/runs",
 		},
+		Server: ServerConfig{
+			ListenAddr:        ":8080",
+			MaxConcurrentRuns: 10,
+			MaxPausedRuns:     20,
+			RunRetention:      1 * time.Hour,
+		},
 	}
 }

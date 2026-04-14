@@ -19,6 +19,7 @@ type Config struct {
 	Tools   ToolsConfig   `yaml:"tools"`
 	Sandbox SandboxConfig `yaml:"sandbox"`
 	Observe ObserveConfig `yaml:"observe"`
+	Server  ServerConfig  `yaml:"server"`
 }
 
 // PlannerConfig controls planner behavior.
@@ -100,6 +101,15 @@ type SandboxConfig struct {
 	NetworkEnabled      bool          `yaml:"network_enabled"`
 	MaxOutputBytes      int           `yaml:"max_output_bytes"`
 	MaxWebResponseBytes int           `yaml:"max_web_response_bytes"`
+}
+
+// ServerConfig controls the HTTP API server.
+type ServerConfig struct {
+	ListenAddr        string        `yaml:"listen_addr"`
+	MaxConcurrentRuns int           `yaml:"max_concurrent_runs"`
+	MaxPausedRuns     int           `yaml:"max_paused_runs"`
+	RunRetention      time.Duration `yaml:"run_retention"`
+	AuthToken         string        `yaml:"auth_token"`
 }
 
 // ObserveConfig controls logging and run recording.
@@ -224,6 +234,19 @@ func ApplyEnv(cfg Config) (Config, error) {
 	cfg.Observe.LogLevel = envString("MATTER_OBSERVE_LOG_LEVEL", cfg.Observe.LogLevel)
 	cfg.Observe.RecordRuns = envBool("MATTER_OBSERVE_RECORD_RUNS", cfg.Observe.RecordRuns)
 	cfg.Observe.RecordDir = envString("MATTER_OBSERVE_RECORD_DIR", cfg.Observe.RecordDir)
+	cfg.Server.ListenAddr = envString("MATTER_SERVER_LISTEN_ADDR", cfg.Server.ListenAddr)
+	if cfg.Server.MaxConcurrentRuns, err = envInt("MATTER_SERVER_MAX_CONCURRENT_RUNS", cfg.Server.MaxConcurrentRuns); err != nil {
+		return cfg, err
+	}
+	if cfg.Server.MaxPausedRuns, err = envInt("MATTER_SERVER_MAX_PAUSED_RUNS", cfg.Server.MaxPausedRuns); err != nil {
+		return cfg, err
+	}
+	if cfg.Server.RunRetention, err = envDuration("MATTER_SERVER_RUN_RETENTION", cfg.Server.RunRetention); err != nil {
+		return cfg, err
+	}
+	// Note: prism may flag this line as "[REDACTED]" — that is its own diff
+	// redaction of the auth token field name, not a code issue.
+	cfg.Server.AuthToken = envString("MATTER_SERVER_AUTH_TOKEN", cfg.Server.AuthToken)
 	return cfg, nil
 }
 
@@ -269,6 +292,9 @@ func RedactConfig(cfg Config) Config {
 			}
 		}
 		cfg.LLM.ExtraHeaders = redacted
+	}
+	if cfg.Server.AuthToken != "" {
+		cfg.Server.AuthToken = "***"
 	}
 	return cfg
 }
