@@ -6,9 +6,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dshills/matter/internal/config"
 	"github.com/dshills/matter/internal/llm"
 	"github.com/dshills/matter/pkg/matter"
 )
+
+func defaultPlannerConfig() config.PlannerConfig {
+	return config.PlannerConfig{
+		MaxResponseTokens: 4096,
+		Temperature:       0,
+	}
+}
+
+func mustNewPlanner(t *testing.T, client llm.Client, cfg config.PlannerConfig) *Planner {
+	t.Helper()
+	p, err := NewPlanner(client, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
 
 func TestPlannerDecideTool(t *testing.T) {
 	resp := llm.Response{
@@ -16,7 +33,7 @@ func TestPlannerDecideTool(t *testing.T) {
 		PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150,
 	}
 	mock := llm.NewMockClient([]llm.Response{resp}, nil)
-	p := NewPlanner(mock)
+	p := mustNewPlanner(t, mock, defaultPlannerConfig())
 
 	dec, _, err := p.Decide(context.Background(), "summarize the code", nil, "[]", BudgetInfo{
 		MaxSteps: 20, MaxTotalTokens: 50000, MaxCostUSD: 3.0, MaxDuration: 2 * time.Minute,
@@ -37,7 +54,7 @@ func TestPlannerDecideComplete(t *testing.T) {
 		Content: `{"type":"complete","reasoning":"done","final":{"summary":"the code does X"}}`,
 	}
 	mock := llm.NewMockClient([]llm.Response{resp}, nil)
-	p := NewPlanner(mock)
+	p := mustNewPlanner(t, mock, defaultPlannerConfig())
 
 	dec, _, err := p.Decide(context.Background(), "summarize", nil, "", BudgetInfo{
 		MaxSteps: 20, MaxTotalTokens: 50000, MaxCostUSD: 3.0, MaxDuration: 2 * time.Minute,
@@ -58,7 +75,7 @@ func TestPlannerDecideFail(t *testing.T) {
 		Content: `{"type":"fail","reasoning":"no tools","final":{"summary":"cannot complete"}}`,
 	}
 	mock := llm.NewMockClient([]llm.Response{resp}, nil)
-	p := NewPlanner(mock)
+	p := mustNewPlanner(t, mock, defaultPlannerConfig())
 
 	dec, _, err := p.Decide(context.Background(), "do something", nil, "", BudgetInfo{
 		MaxSteps: 20, MaxTotalTokens: 50000, MaxCostUSD: 3.0, MaxDuration: 2 * time.Minute,
@@ -77,7 +94,7 @@ func TestPlannerDecideWithRepair(t *testing.T) {
 		Content: "```json\n{\"type\":\"complete\",\"reasoning\":\"ok\",\"final\":{\"summary\":\"done\"}}\n```",
 	}
 	mock := llm.NewMockClient([]llm.Response{resp}, nil)
-	p := NewPlanner(mock)
+	p := mustNewPlanner(t, mock, defaultPlannerConfig())
 
 	dec, _, err := p.Decide(context.Background(), "task", nil, "", BudgetInfo{
 		MaxSteps: 20, MaxTotalTokens: 50000, MaxCostUSD: 3.0, MaxDuration: 2 * time.Minute,
@@ -96,7 +113,7 @@ func TestPlannerDecideWithRepair(t *testing.T) {
 
 func TestPlannerDecideLLMError(t *testing.T) {
 	mock := llm.NewMockClient([]llm.Response{{}}, []error{context.DeadlineExceeded})
-	p := NewPlanner(mock)
+	p := mustNewPlanner(t, mock, defaultPlannerConfig())
 
 	_, _, err := p.Decide(context.Background(), "task", nil, "", BudgetInfo{
 		MaxSteps: 20, MaxTotalTokens: 50000, MaxCostUSD: 3.0, MaxDuration: 2 * time.Minute,
@@ -111,7 +128,7 @@ func TestPlannerPromptContainsRequiredSections(t *testing.T) {
 		Content: `{"type":"complete","reasoning":"ok","final":{"summary":"done"}}`,
 	}
 	mock := llm.NewMockClient([]llm.Response{resp}, nil)
-	p := NewPlanner(mock)
+	p := mustNewPlanner(t, mock, defaultPlannerConfig())
 
 	_, _, err := p.Decide(context.Background(), "my test task", nil, `[{"name":"read"}]`, BudgetInfo{
 		StepsUsed: 5, MaxSteps: 20,
@@ -153,7 +170,7 @@ func TestPlannerDecideWithMemoryContext(t *testing.T) {
 		Content: `{"type":"complete","reasoning":"ok","final":{"summary":"done"}}`,
 	}
 	mock := llm.NewMockClient([]llm.Response{resp}, nil)
-	p := NewPlanner(mock)
+	p := mustNewPlanner(t, mock, defaultPlannerConfig())
 
 	memCtx := []matter.Message{
 		{Role: matter.RoleUser, Content: "original task"},
@@ -175,5 +192,51 @@ func TestPlannerDecideWithMemoryContext(t *testing.T) {
 	}
 	if reqs[0].Messages[0].Role != matter.RoleSystem {
 		t.Errorf("first message should be system, got %q", reqs[0].Messages[0].Role)
+	}
+}
+
+func TestPlannerMaxResponseTokens(t *testing.T) {
+	resp := llm.Response{
+		Content: `{"type":"complete","reasoning":"ok","final":{"summary":"done"}}`,
+	}
+	mock := llm.NewMockClient([]llm.Response{resp}, nil)
+
+	cfg := defaultPlannerConfig()
+	cfg.MaxResponseTokens = 8192
+	p := mustNewPlanner(t, mock, cfg)
+
+	_, _, err := p.Decide(context.Background(), "task", nil, "", BudgetInfo{
+		MaxSteps: 20, MaxTotalTokens: 50000, MaxCostUSD: 3.0, MaxDuration: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqs := mock.Requests()
+	if reqs[0].MaxTokens != 8192 {
+		t.Errorf("MaxTokens = %d, want 8192", reqs[0].MaxTokens)
+	}
+}
+
+func TestPlannerTemperature(t *testing.T) {
+	resp := llm.Response{
+		Content: `{"type":"complete","reasoning":"ok","final":{"summary":"done"}}`,
+	}
+	mock := llm.NewMockClient([]llm.Response{resp}, nil)
+
+	cfg := defaultPlannerConfig()
+	cfg.Temperature = 0.7
+	p := mustNewPlanner(t, mock, cfg)
+
+	_, _, err := p.Decide(context.Background(), "task", nil, "", BudgetInfo{
+		MaxSteps: 20, MaxTotalTokens: 50000, MaxCostUSD: 3.0, MaxDuration: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reqs := mock.Requests()
+	if reqs[0].Temperature != 0.7 {
+		t.Errorf("Temperature = %f, want 0.7", reqs[0].Temperature)
 	}
 }

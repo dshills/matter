@@ -3,9 +3,11 @@ package planner
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/dshills/matter/internal/config"
 	"github.com/dshills/matter/internal/errtype"
 	"github.com/dshills/matter/internal/llm"
 	"github.com/dshills/matter/pkg/matter"
@@ -25,12 +27,32 @@ type BudgetInfo struct {
 
 // Planner produces typed decisions by delegating to an LLM client.
 type Planner struct {
-	client llm.Client
+	client         llm.Client
+	cfg            config.PlannerConfig
+	resolvedPrompt string // loaded from file at construction time
 }
 
 // NewPlanner creates a planner backed by the given LLM client.
-func NewPlanner(client llm.Client) *Planner {
-	return &Planner{client: client}
+// The prompt file (if configured) is read once at construction time.
+func NewPlanner(client llm.Client, cfg config.PlannerConfig) (*Planner, error) {
+	p := &Planner{client: client, cfg: cfg}
+
+	// Resolve system_prompt_file at construction time.
+	if cfg.SystemPromptFile != "" && cfg.SystemPrompt == "" {
+		data, err := os.ReadFile(cfg.SystemPromptFile)
+		if err != nil {
+			return nil, errtype.NewConfigurationError(
+				fmt.Sprintf("failed to read system_prompt_file %q", cfg.SystemPromptFile), err)
+		}
+		content := strings.TrimSpace(string(data))
+		if content == "" {
+			return nil, errtype.NewConfigurationError(
+				fmt.Sprintf("system_prompt_file %q is empty", cfg.SystemPromptFile), nil)
+		}
+		p.resolvedPrompt = content
+	}
+
+	return p, nil
 }
 
 // Decide calls the LLM with a constructed prompt and parses the response
@@ -43,7 +65,7 @@ func (p *Planner) Decide(
 	toolSchemas string,
 	budget BudgetInfo,
 ) (matter.Decision, llm.Response, error) {
-	prompt := buildPrompt(task, toolSchemas, budget)
+	prompt := p.buildPrompt(task, toolSchemas, budget)
 
 	messages := make([]matter.Message, 0, len(memoryContext)+1)
 	messages = append(messages, matter.Message{
@@ -54,8 +76,8 @@ func (p *Planner) Decide(
 
 	req := llm.Request{
 		Messages:    messages,
-		MaxTokens:   4096,
-		Temperature: 0,
+		MaxTokens:   p.cfg.MaxResponseTokens,
+		Temperature: p.cfg.Temperature,
 	}
 
 	resp, err := p.client.Complete(ctx, req)
@@ -76,18 +98,49 @@ func (p *Planner) Decide(
 	return result.Decision, resp, nil
 }
 
-// buildPrompt constructs the system prompt per spec Section 8.6.
-func buildPrompt(task, toolSchemas string, budget BudgetInfo) string {
+// defaultPersona is the v1 default persona and instructions section.
+const defaultPersona = "You are an autonomous agent. Your job is to complete the user's task by choosing tools or providing a final answer."
+
+// defaultInstructions is the v1 default instruction set.
+const defaultInstructions = `## Instructions
+- Do not invent tools that are not in the Available Tools list.
+- Do not repeat failed steps blindly.
+- Complete when enough information is available.
+- Prefer minimal tool usage needed to finish the task.`
+
+// buildPrompt constructs the system prompt per spec Section 2.3.
+// Prompt precedence: system_prompt > system_prompt_file > default.
+// When system_prompt is set, prefix/suffix are ignored.
+// Structural sections (Tools, Budget, Output Format) are always appended.
+func (p *Planner) buildPrompt(task, toolSchemas string, budget BudgetInfo) string {
 	var b strings.Builder
 
-	b.WriteString("You are an autonomous agent. Your job is to complete the user's task by choosing tools or providing a final answer.\n\n")
+	// Determine the persona/instructions section.
+	switch {
+	case p.cfg.SystemPrompt != "":
+		// Full override — prefix/suffix ignored per spec §2.2.
+		b.WriteString(p.cfg.SystemPrompt)
+		b.WriteString("\n\n")
+	case p.resolvedPrompt != "":
+		// File-based override — prefix/suffix ignored per spec §2.2.
+		b.WriteString(p.resolvedPrompt)
+		b.WriteString("\n\n")
+	default:
+		// Default prompt with optional prefix/suffix.
+		if p.cfg.PromptPrefix != "" {
+			b.WriteString(p.cfg.PromptPrefix)
+			b.WriteString("\n\n")
+		}
+		b.WriteString(defaultPersona)
+		b.WriteString("\n\n")
+	}
 
-	// 1. User task
+	// Task section.
 	b.WriteString("## Task\n")
 	b.WriteString(task)
 	b.WriteString("\n\n")
 
-	// 2. Available tools
+	// Available tools section.
 	b.WriteString("## Available Tools\n")
 	if toolSchemas != "" {
 		b.WriteString(toolSchemas)
@@ -96,22 +149,34 @@ func buildPrompt(task, toolSchemas string, budget BudgetInfo) string {
 	}
 	b.WriteString("\n\n")
 
-	// 3. Budget and limits
+	// Budget section — only display limits that are configured (non-zero).
 	b.WriteString("## Budget\n")
-	fmt.Fprintf(&b, "- Steps: %d / %d\n", budget.StepsUsed, budget.MaxSteps)
-	fmt.Fprintf(&b, "- Tokens: %d / %d\n", budget.TokensUsed, budget.MaxTotalTokens)
-	fmt.Fprintf(&b, "- Cost: $%.4f / $%.2f\n", budget.CostUsed, budget.MaxCostUSD)
-	fmt.Fprintf(&b, "- Time: %s / %s\n", budget.TimeElapsed.Round(time.Second), budget.MaxDuration.Round(time.Second))
+	if budget.MaxSteps > 0 {
+		fmt.Fprintf(&b, "- Steps: %d / %d\n", budget.StepsUsed, budget.MaxSteps)
+	}
+	if budget.MaxTotalTokens > 0 {
+		fmt.Fprintf(&b, "- Tokens: %d / %d\n", budget.TokensUsed, budget.MaxTotalTokens)
+	}
+	if budget.MaxCostUSD > 0 {
+		fmt.Fprintf(&b, "- Cost: $%.4f / $%.2f\n", budget.CostUsed, budget.MaxCostUSD)
+	}
+	if budget.MaxDuration > 0 {
+		fmt.Fprintf(&b, "- Time: %s / %s\n", budget.TimeElapsed.Round(time.Second), budget.MaxDuration.Round(time.Second))
+	}
 	b.WriteString("\n")
 
-	// 4. Instructions
-	b.WriteString("## Instructions\n")
-	b.WriteString("- Do not invent tools that are not in the Available Tools list.\n")
-	b.WriteString("- Do not repeat failed steps blindly.\n")
-	b.WriteString("- Complete when enough information is available.\n")
-	b.WriteString("- Prefer minimal tool usage needed to finish the task.\n\n")
+	// Instructions section (only for default prompt path).
+	if p.cfg.SystemPrompt == "" && p.resolvedPrompt == "" {
+		b.WriteString(defaultInstructions)
+		b.WriteString("\n")
+		if p.cfg.PromptSuffix != "" {
+			b.WriteString("\n")
+			b.WriteString(p.cfg.PromptSuffix)
+		}
+		b.WriteString("\n\n")
+	}
 
-	// 5. Output format
+	// Output format section — always appended, cannot be overridden.
 	b.WriteString("## Output Format\n")
 	b.WriteString("Respond with a single JSON object. Choose one:\n\n")
 	b.WriteString(`Tool call: {"type":"tool","reasoning":"...","tool_call":{"name":"...","input":{...}}}`)

@@ -24,6 +24,10 @@ func DefaultConfig() Config {
 			MaxToolResultChars:     8000,
 			MaxContextChars:        128000,
 		},
+		Planner: PlannerConfig{
+			MaxResponseTokens: 4096,
+			Temperature:       0,
+		},
 		LLM: LLMConfig{
 			Provider:   "openai",
 			Model:      "gpt-4o",

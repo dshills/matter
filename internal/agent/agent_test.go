@@ -100,7 +100,11 @@ func setupAgent(cfg config.Config, mockClient *llm.MockClient, toolList ...matte
 		MaxCostUSD:     cfg.Agent.MaxCostUSD,
 	}
 	checker := policy.NewChecker(policyState)
-	return New(cfg, mockClient, reg, checker)
+	ag, err := New(cfg, mockClient, reg, checker)
+	if err != nil {
+		panic(err)
+	}
+	return ag
 }
 
 // TestAgentCompletes verifies the agent terminates on a complete decision.

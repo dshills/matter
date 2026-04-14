@@ -85,7 +85,10 @@ func (r *Runner) Run(ctx context.Context, req matter.RunRequest) matter.RunResul
 	checker := policy.NewChecker(policyState)
 
 	// Create agent with per-run components.
-	ag := agent.New(r.cfg, r.llmClient, registry, checker)
+	ag, err := agent.New(r.cfg, r.llmClient, registry, checker)
+	if err != nil {
+		return matter.RunResult{Error: err}
+	}
 	ag.SetObserver(r.observer)
 
 	return ag.Run(ctx, req)

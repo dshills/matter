@@ -36,15 +36,19 @@ func New(
 	llmClient llm.Client,
 	registry *tools.Registry,
 	policyChecker policy.Checker,
-) *Agent {
+) (*Agent, error) {
+	p, err := planner.NewPlanner(llmClient, cfg.Planner)
+	if err != nil {
+		return nil, fmt.Errorf("creating planner: %w", err)
+	}
 	return &Agent{
 		cfg:       cfg,
-		planner:   planner.NewPlanner(llmClient),
+		planner:   p,
 		executor:  tools.NewExecutor(registry),
 		registry:  registry,
 		llmClient: llmClient,
 		policy:    policyChecker,
-	}
+	}, nil
 }
 
 // Run executes the agent loop for the given request.

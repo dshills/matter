@@ -15,9 +15,20 @@ type Config struct {
 	Agent   AgentConfig   `yaml:"agent"`
 	Memory  MemoryConfig  `yaml:"memory"`
 	LLM     LLMConfig     `yaml:"llm"`
+	Planner PlannerConfig `yaml:"planner"`
 	Tools   ToolsConfig   `yaml:"tools"`
 	Sandbox SandboxConfig `yaml:"sandbox"`
 	Observe ObserveConfig `yaml:"observe"`
+}
+
+// PlannerConfig controls planner behavior.
+type PlannerConfig struct {
+	SystemPrompt      string  `yaml:"system_prompt"`
+	SystemPromptFile  string  `yaml:"system_prompt_file"`
+	PromptPrefix      string  `yaml:"prompt_prefix"`
+	PromptSuffix      string  `yaml:"prompt_suffix"`
+	MaxResponseTokens int     `yaml:"max_response_tokens"`
+	Temperature       float64 `yaml:"temperature"`
 }
 
 // AgentConfig controls agent loop limits.
@@ -157,6 +168,16 @@ func ApplyEnv(cfg Config) (Config, error) {
 	}
 	cfg.LLM.PricingFile = envString("MATTER_LLM_PRICING_FILE", cfg.LLM.PricingFile)
 	if cfg.LLM.FallbackCostPer1K, err = envFloat("MATTER_LLM_FALLBACK_COST_PER_1K", cfg.LLM.FallbackCostPer1K); err != nil {
+		return cfg, err
+	}
+	cfg.Planner.SystemPrompt = envString("MATTER_PLANNER_SYSTEM_PROMPT", cfg.Planner.SystemPrompt)
+	cfg.Planner.SystemPromptFile = envString("MATTER_PLANNER_SYSTEM_PROMPT_FILE", cfg.Planner.SystemPromptFile)
+	cfg.Planner.PromptPrefix = envString("MATTER_PLANNER_PROMPT_PREFIX", cfg.Planner.PromptPrefix)
+	cfg.Planner.PromptSuffix = envString("MATTER_PLANNER_PROMPT_SUFFIX", cfg.Planner.PromptSuffix)
+	if cfg.Planner.MaxResponseTokens, err = envInt("MATTER_PLANNER_MAX_RESPONSE_TOKENS", cfg.Planner.MaxResponseTokens); err != nil {
+		return cfg, err
+	}
+	if cfg.Planner.Temperature, err = envFloat("MATTER_PLANNER_TEMPERATURE", cfg.Planner.Temperature); err != nil {
 		return cfg, err
 	}
 	cfg.Tools.EnableWorkspaceRead = envBool("MATTER_TOOLS_ENABLE_WORKSPACE_READ", cfg.Tools.EnableWorkspaceRead)
