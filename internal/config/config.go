@@ -29,6 +29,7 @@ type PlannerConfig struct {
 	PromptSuffix      string  `yaml:"prompt_suffix"`
 	MaxResponseTokens int     `yaml:"max_response_tokens"`
 	Temperature       float64 `yaml:"temperature"`
+	MaxPlanSteps      int     `yaml:"max_plan_steps"` // max tool calls in a single plan sequence; 1 disables multi-step
 }
 
 // AgentConfig controls agent loop limits.
@@ -183,6 +184,9 @@ func ApplyEnv(cfg Config) (Config, error) {
 		return cfg, err
 	}
 	if cfg.Planner.Temperature, err = envFloat("MATTER_PLANNER_TEMPERATURE", cfg.Planner.Temperature); err != nil {
+		return cfg, err
+	}
+	if cfg.Planner.MaxPlanSteps, err = envInt("MATTER_PLANNER_MAX_PLAN_STEPS", cfg.Planner.MaxPlanSteps); err != nil {
 		return cfg, err
 	}
 	cfg.Tools.EnableWorkspaceRead = envBool("MATTER_TOOLS_ENABLE_WORKSPACE_READ", cfg.Tools.EnableWorkspaceRead)

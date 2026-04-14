@@ -70,6 +70,16 @@ func toolDecision(name string, input map[string]any) string {
 	return string(b)
 }
 
+func multiToolDecision(calls ...matter.ToolCall) string {
+	d := matter.Decision{
+		Type:      matter.DecisionTypeTool,
+		Reasoning: "need multiple tools",
+		ToolCalls: calls,
+	}
+	b, _ := json.Marshal(d)
+	return string(b)
+}
+
 func echoTool() matter.Tool {
 	return matter.Tool{
 		Name:        "echo",
@@ -367,5 +377,158 @@ func TestAgentTokenTracking(t *testing.T) {
 	}
 	if result.TotalCostUSD != 0.015 {
 		t.Errorf("total cost = %f, want 0.015", result.TotalCostUSD)
+	}
+}
+
+// TestAgentMultiStepSuccess verifies a multi-step tool sequence executes all calls.
+func TestAgentMultiStepSuccess(t *testing.T) {
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: multiToolDecision(
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "a"}},
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "b"}},
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "c"}},
+		), TotalTokens: 100},
+		{Content: completeDecision("all done"), TotalTokens: 50},
+	}, nil)
+
+	a := setupAgent(testConfig(), mock, echoTool())
+	result := a.Run(context.Background(), matter.RunRequest{Task: "multi"})
+
+	if !result.Success {
+		t.Errorf("expected success, got error: %v", result.Error)
+	}
+	// 3 tool calls + 1 complete = 4 steps. First tool call uses step from step(),
+	// calls 2 and 3 each increment steps, then complete is step 4.
+	if result.Steps != 4 {
+		t.Errorf("steps = %d, want 4", result.Steps)
+	}
+}
+
+// TestAgentMultiStepMidSequenceFailure verifies that a failing tool stops the sequence.
+func TestAgentMultiStepMidSequenceFailure(t *testing.T) {
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: multiToolDecision(
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "ok"}},
+			matter.ToolCall{Name: "fail_tool", Input: map[string]any{}},
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "skip"}},
+		), TotalTokens: 100},
+		{Content: completeDecision("recovered"), TotalTokens: 50},
+	}, nil)
+
+	a := setupAgent(testConfig(), mock, echoTool(), failingTool(false))
+	result := a.Run(context.Background(), matter.RunRequest{Task: "fail mid"})
+
+	if !result.Success {
+		t.Errorf("expected recovery after mid-sequence failure, got: %v", result.Error)
+	}
+	// Step 1: planner + echo(ok) succeeds, fail_tool fails (step 2) → stops sequence.
+	// Step 3: planner produces complete. Total = 3.
+	if result.Steps != 3 {
+		t.Errorf("steps = %d, want 3", result.Steps)
+	}
+}
+
+// TestAgentMultiStepFatalFailure verifies fatal tool error terminates the run.
+func TestAgentMultiStepFatalFailure(t *testing.T) {
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: multiToolDecision(
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "ok"}},
+			matter.ToolCall{Name: "fail_tool", Input: map[string]any{}},
+		), TotalTokens: 100},
+	}, nil)
+
+	a := setupAgent(testConfig(), mock, echoTool(), failingTool(true))
+	result := a.Run(context.Background(), matter.RunRequest{Task: "fatal mid"})
+
+	if result.Success {
+		t.Error("expected failure from fatal tool error")
+	}
+}
+
+// TestAgentMultiStepOverLimit verifies sequences exceeding max_plan_steps are rejected.
+func TestAgentMultiStepOverLimit(t *testing.T) {
+	cfg := testConfig()
+	cfg.Planner.MaxPlanSteps = 2
+
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: multiToolDecision(
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "a"}},
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "b"}},
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "c"}},
+		), TotalTokens: 100},
+		{Content: completeDecision("recovered"), TotalTokens: 50},
+	}, nil)
+
+	a := setupAgent(cfg, mock, echoTool())
+	result := a.Run(context.Background(), matter.RunRequest{Task: "over limit"})
+
+	// Sequence is rejected as planner error; agent recovers with complete.
+	if !result.Success {
+		t.Errorf("expected recovery, got: %v", result.Error)
+	}
+}
+
+// TestAgentMultiStepDisabledMaxPlanSteps1 verifies max_plan_steps=1 disables multi-step.
+func TestAgentMultiStepDisabledMaxPlanSteps1(t *testing.T) {
+	cfg := testConfig()
+	cfg.Planner.MaxPlanSteps = 1
+
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: multiToolDecision(
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "a"}},
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "b"}},
+		), TotalTokens: 100},
+		{Content: completeDecision("recovered"), TotalTokens: 50},
+	}, nil)
+
+	a := setupAgent(cfg, mock, echoTool())
+	result := a.Run(context.Background(), matter.RunRequest{Task: "disabled"})
+
+	if !result.Success {
+		t.Errorf("expected recovery after rejection, got: %v", result.Error)
+	}
+}
+
+// TestAgentMultiStepStepCounting verifies each call counts as a step.
+func TestAgentMultiStepStepCounting(t *testing.T) {
+	cfg := testConfig()
+	cfg.Agent.MaxSteps = 3 // tight budget
+
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: multiToolDecision(
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "a"}},
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "b"}},
+			matter.ToolCall{Name: "echo", Input: map[string]any{"msg": "c"}},
+		), TotalTokens: 100},
+	}, nil)
+
+	a := setupAgent(cfg, mock, echoTool())
+	result := a.Run(context.Background(), matter.RunRequest{Task: "tight budget"})
+
+	// 3 tool calls consume all 3 steps. The loop will check limits before
+	// step 4 (if it tries), hitting the limit.
+	if result.Success {
+		t.Error("expected failure due to step limit")
+	}
+	if !errors.Is(result.Error, errtype.ErrLimitExceeded) {
+		t.Errorf("expected limit_exceeded_error, got %v", result.Error)
+	}
+}
+
+// TestAgentSingleToolCallV1Format verifies backward compat with single tool_call.
+func TestAgentSingleToolCallV1Format(t *testing.T) {
+	mock := llm.NewMockClient([]llm.Response{
+		{Content: toolDecision("echo", map[string]any{"msg": "v1"}), TotalTokens: 100},
+		{Content: completeDecision("v1 works"), TotalTokens: 50},
+	}, nil)
+
+	a := setupAgent(testConfig(), mock, echoTool())
+	result := a.Run(context.Background(), matter.RunRequest{Task: "v1 format"})
+
+	if !result.Success {
+		t.Errorf("expected success, got: %v", result.Error)
+	}
+	if result.Steps != 2 {
+		t.Errorf("steps = %d, want 2", result.Steps)
 	}
 }

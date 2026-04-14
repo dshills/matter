@@ -13,11 +13,19 @@ import (
 func ValidateDecision(d matter.Decision) error {
 	switch d.Type {
 	case matter.DecisionTypeTool:
-		if d.ToolCall == nil {
-			return fmt.Errorf("decision type is %q but tool_call is missing", d.Type)
-		}
-		if d.ToolCall.Name == "" {
-			return fmt.Errorf("decision type is %q but tool_call.name is empty", d.Type)
+		// ToolCalls takes precedence over ToolCall when both are present.
+		if len(d.ToolCalls) > 0 {
+			for i, tc := range d.ToolCalls {
+				if tc.Name == "" {
+					return fmt.Errorf("decision type is %q but tool_calls[%d].name is empty", d.Type, i)
+				}
+			}
+		} else if d.ToolCall != nil {
+			if d.ToolCall.Name == "" {
+				return fmt.Errorf("decision type is %q but tool_call.name is empty", d.Type)
+			}
+		} else {
+			return fmt.Errorf("decision type is %q but neither tool_call nor tool_calls is set", d.Type)
 		}
 	case matter.DecisionTypeComplete:
 		if d.Final == nil {

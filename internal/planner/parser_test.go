@@ -219,3 +219,64 @@ func TestParseDecisionAskEmptyQuestion(t *testing.T) {
 		t.Error("expected error when ask.question is empty")
 	}
 }
+
+func TestParseDecisionMultiStepToolCalls(t *testing.T) {
+	raw := `{"type":"tool","reasoning":"read files","tool_calls":[{"name":"read","input":{"path":"a.txt"}},{"name":"read","input":{"path":"b.txt"}}]}`
+	result, err := ParseDecision(context.Background(), nil, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision.Type != matter.DecisionTypeTool {
+		t.Errorf("type = %q, want tool", result.Decision.Type)
+	}
+	if len(result.Decision.ToolCalls) != 2 {
+		t.Fatalf("tool_calls count = %d, want 2", len(result.Decision.ToolCalls))
+	}
+	if result.Decision.ToolCalls[0].Name != "read" {
+		t.Errorf("tool_calls[0].name = %q, want read", result.Decision.ToolCalls[0].Name)
+	}
+	if result.Decision.ToolCalls[1].Name != "read" {
+		t.Errorf("tool_calls[1].name = %q, want read", result.Decision.ToolCalls[1].Name)
+	}
+}
+
+func TestParseDecisionMultiStepEmptyName(t *testing.T) {
+	raw := `{"type":"tool","reasoning":"test","tool_calls":[{"name":"read","input":{}},{"name":"","input":{}}]}`
+	_, err := ParseDecision(context.Background(), nil, raw)
+	if err == nil {
+		t.Error("expected error when tool_calls contains empty name")
+	}
+}
+
+func TestParseDecisionMultiStepTakesPrecedence(t *testing.T) {
+	// When both tool_call and tool_calls are set, tool_calls wins.
+	raw := `{"type":"tool","reasoning":"test","tool_call":{"name":"ignored","input":{}},"tool_calls":[{"name":"used","input":{}}]}`
+	result, err := ParseDecision(context.Background(), nil, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Decision.ToolCalls) != 1 {
+		t.Fatalf("tool_calls count = %d, want 1", len(result.Decision.ToolCalls))
+	}
+	if result.Decision.ToolCalls[0].Name != "used" {
+		t.Errorf("tool_calls[0].name = %q, want used", result.Decision.ToolCalls[0].Name)
+	}
+}
+
+func TestParseDecisionSingleToolCallStillWorks(t *testing.T) {
+	// v1 format with just tool_call should continue to work.
+	raw := `{"type":"tool","reasoning":"test","tool_call":{"name":"read","input":{"path":"file.txt"}}}`
+	result, err := ParseDecision(context.Background(), nil, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Decision.ToolCall == nil {
+		t.Fatal("expected tool_call to be set")
+	}
+	if result.Decision.ToolCall.Name != "read" {
+		t.Errorf("tool_call.name = %q, want read", result.Decision.ToolCall.Name)
+	}
+	if len(result.Decision.ToolCalls) != 0 {
+		t.Errorf("tool_calls should be empty for v1 format, got %d", len(result.Decision.ToolCalls))
+	}
+}

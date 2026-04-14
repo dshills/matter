@@ -110,6 +110,11 @@ const defaultInstructions = `## Instructions
 - Complete when enough information is available.
 - Prefer minimal tool usage needed to finish the task.`
 
+// MaxPlanSteps returns the configured max_plan_steps for prompt construction.
+func (p *Planner) MaxPlanSteps() int {
+	return p.cfg.MaxPlanSteps
+}
+
 // buildPrompt constructs the system prompt per spec Section 2.3.
 // Prompt precedence: system_prompt > system_prompt_file > default.
 // When system_prompt is set, prefix/suffix are ignored.
@@ -178,6 +183,13 @@ func (p *Planner) buildPrompt(task, toolSchemas string, budget BudgetInfo) strin
 			b.WriteString("- Ask the user only when the task is genuinely ambiguous. Do not ask for confirmation of routine actions.\n")
 			b.WriteString("- Use options when the question has a small number of likely answers.\n")
 		}
+		if p.cfg.MaxPlanSteps > 1 {
+			b.WriteString("\n")
+			b.WriteString("- When multiple tool calls are needed and their inputs don't depend on each other's outputs, return them as a tool_calls array.\n")
+			b.WriteString("- Each tool in the sequence is executed in order. If one fails, the rest are skipped and you will be asked to replan.\n")
+			b.WriteString("- Limit sequences to straightforward operations. Do not chain calls where later inputs depend on earlier outputs.\n")
+			fmt.Fprintf(&b, "- Each tool call in a sequence counts as a separate step. Maximum sequence length: %d.\n", p.cfg.MaxPlanSteps)
+		}
 		b.WriteString("\n")
 		if p.cfg.PromptSuffix != "" {
 			b.WriteString("\n")
@@ -191,6 +203,10 @@ func (p *Planner) buildPrompt(task, toolSchemas string, budget BudgetInfo) strin
 	b.WriteString("Respond with a single JSON object. Choose one:\n\n")
 	b.WriteString(`Tool call: {"type":"tool","reasoning":"...","tool_call":{"name":"...","input":{...}}}`)
 	b.WriteString("\n")
+	if p.cfg.MaxPlanSteps > 1 {
+		b.WriteString(`Multi-step plan: {"type":"tool","reasoning":"...","tool_calls":[{"name":"...","input":{...}},{"name":"...","input":{...}}]}`)
+		b.WriteString("\n")
+	}
 	b.WriteString(`Complete: {"type":"complete","reasoning":"...","final":{"summary":"..."}}`)
 	b.WriteString("\n")
 	b.WriteString(`Fail: {"type":"fail","reasoning":"...","final":{"summary":"..."}}`)

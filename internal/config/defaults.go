@@ -28,6 +28,7 @@ func DefaultConfig() Config {
 		Planner: PlannerConfig{
 			MaxResponseTokens: 4096,
 			Temperature:       0,
+			MaxPlanSteps:      5,
 		},
 		LLM: LLMConfig{
 			Provider:   "openai",

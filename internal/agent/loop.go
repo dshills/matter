@@ -118,6 +118,10 @@ func (a *Agent) step(ctx context.Context, req matter.RunRequest) (matter.RunResu
 		}, true
 
 	case matter.DecisionTypeTool:
+		// Resolve ToolCalls vs ToolCall: ToolCalls takes precedence.
+		if len(decision.ToolCalls) > 0 {
+			return a.executeToolSequence(ctx, decision)
+		}
 		return a.executeTool(ctx, decision)
 
 	case matter.DecisionTypeAsk:
@@ -129,27 +133,46 @@ func (a *Agent) step(ctx context.Context, req matter.RunRequest) (matter.RunResu
 	}, true
 }
 
+// toolExecOutcome describes the result of a single tool execution.
+type toolExecOutcome struct {
+	result  matter.RunResult
+	done    bool // true if the run should terminate
+	toolErr bool // true if the tool had a non-fatal error (sequence should stop)
+}
+
 // executeTool handles a tool call decision: policy check → execute → store result.
 func (a *Agent) executeTool(ctx context.Context, decision matter.Decision) (matter.RunResult, bool) {
+	out := a.executeOneTool(ctx, decision, false)
+	return out.result, out.done
+}
+
+// executeOneTool performs a single tool execution and returns the full outcome
+// including whether the tool had a non-fatal error (used by sequence execution).
+// When skipPlannerMsg is true, the planner decision message is not stored in
+// memory (the caller is responsible for storing it once for the whole sequence).
+func (a *Agent) executeOneTool(ctx context.Context, decision matter.Decision, skipPlannerMsg bool) toolExecOutcome {
 	tc := decision.ToolCall
 	if tc == nil {
-		return a.handleError(ctx, NewPlannerError("tool decision missing tool_call", nil), nil)
+		r, d := a.handleError(ctx, NewPlannerError("tool decision missing tool_call", nil), nil)
+		return toolExecOutcome{result: r, done: d, toolErr: true}
 	}
 
 	// Look up the tool for policy checks.
 	tool, ok := a.registry.Get(tc.Name)
 	if !ok {
 		toolErr := NewToolValidationError(fmt.Sprintf("tool %q not found", tc.Name), nil)
-		return a.handleError(ctx, toolErr, nil)
+		r, d := a.handleError(ctx, toolErr, nil)
+		return toolExecOutcome{result: r, done: d, toolErr: true}
 	}
 
 	// Policy check for unsafe tools.
 	if !tool.Safe && a.policy != nil {
 		pr := a.policy.CheckToolCall(ctx, tool, tc.Input)
 		if !pr.Allowed {
-			return matter.RunResult{
-				Error: NewPolicyViolationError(pr.Reason),
-			}, true
+			return toolExecOutcome{
+				result: matter.RunResult{Error: NewPolicyViolationError(pr.Reason)},
+				done:   true,
+			}
 		}
 	}
 
@@ -163,15 +186,28 @@ func (a *Agent) executeTool(ctx context.Context, decision matter.Decision) (matt
 	toolStart := time.Now()
 	rec := a.executor.Execute(ctx, a.metrics.Steps, tc.Name, tc.Input)
 
-	// Store the planner decision as an assistant message.
-	plannerMsg := matter.Message{
-		Role:      matter.RolePlanner,
-		Content:   fmt.Sprintf(`{"type":"tool","tool_call":{"name":"%s"}}`, tc.Name),
-		Timestamp: time.Now(),
-		Step:      a.metrics.Steps,
-	}
-	if err := a.memory.Add(ctx, plannerMsg); err != nil {
-		return matter.RunResult{Error: fmt.Errorf("failed to store planner message: %w", err)}, true
+	// Store the planner decision as an assistant message (skipped for
+	// multi-step sequences where the caller stores one message for the batch).
+	if !skipPlannerMsg {
+		decJSON, err := json.Marshal(decision)
+		if err != nil {
+			return toolExecOutcome{
+				result: matter.RunResult{Error: fmt.Errorf("failed to marshal planner decision: %w", err)},
+				done:   true,
+			}
+		}
+		plannerMsg := matter.Message{
+			Role:      matter.RolePlanner,
+			Content:   string(decJSON),
+			Timestamp: time.Now(),
+			Step:      a.metrics.Steps,
+		}
+		if err := a.memory.Add(ctx, plannerMsg); err != nil {
+			return toolExecOutcome{
+				result: matter.RunResult{Error: fmt.Errorf("failed to store planner message: %w", err)},
+				done:   true,
+			}
+		}
 	}
 
 	// Store the tool result.
@@ -186,7 +222,10 @@ func (a *Agent) executeTool(ctx context.Context, decision matter.Decision) (matt
 		Step:      a.metrics.Steps,
 	}
 	if err := a.memory.Add(ctx, toolMsg); err != nil {
-		return matter.RunResult{Error: fmt.Errorf("failed to store tool result: %w", err)}, true
+		return toolExecOutcome{
+			result: matter.RunResult{Error: fmt.Errorf("failed to store tool result: %w", err)},
+			done:   true,
+		}
 	}
 
 	// Notify observer of tool completion.
@@ -198,11 +237,14 @@ func (a *Agent) executeTool(ctx context.Context, decision matter.Decision) (matt
 	if rec.Error != "" {
 		toolErr := NewToolExecutionError(rec.Error, nil, tool.FatalOnError)
 		if tool.FatalOnError {
-			return matter.RunResult{Error: toolErr}, true
+			return toolExecOutcome{
+				result: matter.RunResult{Error: toolErr},
+				done:   true,
+			}
 		}
-		// Recoverable: update progress tracking and continue.
+		// Recoverable: update progress tracking, signal tool error.
 		a.updateProgress(decision, &rec.Result, toolErr)
-		return matter.RunResult{}, false
+		return toolExecOutcome{toolErr: true}
 	}
 
 	// Check repeated tool calls.
@@ -210,6 +252,84 @@ func (a *Agent) executeTool(ctx context.Context, decision matter.Decision) (matt
 
 	// Update progress tracking.
 	a.updateProgress(decision, &rec.Result, nil)
+
+	return toolExecOutcome{}
+}
+
+// executeToolSequence handles a multi-step tool_calls decision. Each tool call
+// is executed sequentially, with policy checks, limit evaluation, and loop
+// detection applied individually per call. If any call fails, the sequence
+// stops and control returns to the planner with all results so far in memory.
+// Each tool call consumes one step toward max_steps.
+func (a *Agent) executeToolSequence(ctx context.Context, decision matter.Decision) (matter.RunResult, bool) {
+	maxPlanSteps := a.cfg.Planner.MaxPlanSteps
+	if maxPlanSteps <= 0 {
+		maxPlanSteps = 1
+	}
+
+	// Reject sequences exceeding max_plan_steps.
+	if len(decision.ToolCalls) > maxPlanSteps {
+		return a.handleError(ctx,
+			NewPlannerError(fmt.Sprintf("tool_calls sequence length %d exceeds max_plan_steps %d",
+				len(decision.ToolCalls), maxPlanSteps), nil), nil)
+	}
+
+	// Store one planner message for the entire sequence (not per-call).
+	seqData, err := json.Marshal(decision)
+	if err != nil {
+		return matter.RunResult{Error: fmt.Errorf("failed to marshal sequence decision: %w", err)}, true
+	}
+	plannerMsg := matter.Message{
+		Role:      matter.RolePlanner,
+		Content:   string(seqData),
+		Timestamp: time.Now(),
+		Step:      a.metrics.Steps,
+	}
+	if err := a.memory.Add(ctx, plannerMsg); err != nil {
+		return matter.RunResult{Error: fmt.Errorf("failed to store planner message: %w", err)}, true
+	}
+
+	for i := range decision.ToolCalls {
+		// Check context cancellation between calls.
+		if err := ctx.Err(); err != nil {
+			return matter.RunResult{
+				Error: NewTimeoutError("context cancelled during tool sequence", err, true),
+			}, true
+		}
+
+		// Check limits before each call (first call already checked by loop()).
+		if i > 0 {
+			if lc := EvaluateLimits(a.cfg.Agent, a.metrics); lc.Exceeded {
+				if a.session != nil {
+					a.session.LimitExceeded(a.metrics.Steps, lc.Limit, lc.Message)
+				}
+				return matter.RunResult{
+					Error: NewLimitExceededError(lc.Message),
+				}, true
+			}
+			// Increment step counter for calls after the first (first was
+			// counted by step()).
+			a.metrics.Steps++
+		}
+
+		// Create a single-tool decision for executeOneTool. Use slice
+		// indexing to avoid loop variable pointer issues.
+		singleDecision := matter.Decision{
+			Type:      matter.DecisionTypeTool,
+			Reasoning: decision.Reasoning,
+			ToolCall:  &decision.ToolCalls[i],
+		}
+
+		out := a.executeOneTool(ctx, singleDecision, true)
+		if out.done {
+			return out.result, true
+		}
+		// If the tool had a non-fatal error, stop the sequence and return
+		// to the planner. The error is already stored in memory.
+		if out.toolErr {
+			return out.result, false
+		}
+	}
 
 	return matter.RunResult{}, false
 }

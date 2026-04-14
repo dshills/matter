@@ -39,6 +39,7 @@ type Decision struct {
 	Type      DecisionType `json:"type"`
 	Reasoning string       `json:"reasoning"`
 	ToolCall  *ToolCall    `json:"tool_call,omitempty"`
+	ToolCalls []ToolCall   `json:"tool_calls,omitempty"` // ordered sequence; takes precedence over ToolCall
 	Final     *FinalAnswer `json:"final,omitempty"`
 	Ask       *AskRequest  `json:"ask,omitempty"`
 }
@@ -50,6 +51,9 @@ type AskRequest struct {
 }
 
 // ToolCall represents a request to invoke a registered tool.
+// Tool results are correlated by message order in memory, not by call ID.
+// If provider-specific IDs are needed (e.g., OpenAI function calling),
+// they should be handled in the provider adapter layer.
 type ToolCall struct {
 	Name  string         `json:"name"`
 	Input map[string]any `json:"input"`
