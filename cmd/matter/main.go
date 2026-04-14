@@ -142,7 +142,8 @@ func cmdConfig(args []string) int {
 		return exitConfigErr
 	}
 
-	data, err := yaml.Marshal(cfg)
+	redacted := config.RedactConfig(cfg)
+	data, err := yaml.Marshal(redacted)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to marshal config: %s\n", err)
 		return exitFailure
@@ -198,13 +199,23 @@ func cmdReplay(_ []string) int {
 }
 
 // createLLMClient returns the appropriate LLM client based on config and flags.
-// Real provider implementations will be added in Phase 10; for now only mock
-// is available.
+// The --mock flag is a shorthand that overrides the provider to "mock".
 func createLLMClient(cfg config.Config, mock bool) (llm.Client, error) {
+	provider := cfg.LLM.Provider
 	if mock {
-		return llm.NewMockClient(nil, nil), nil
+		provider = "mock"
 	}
-	return nil, fmt.Errorf("LLM provider %q is not yet implemented; use --mock for testing", cfg.LLM.Provider)
+
+	apiKey := llm.ResolveAPIKey(provider, cfg.LLM.APIKey)
+
+	return llm.NewClient(llm.ProviderConfig{
+		Provider:     provider,
+		Model:        cfg.LLM.Model,
+		Timeout:      cfg.LLM.Timeout,
+		APIKey:       apiKey,
+		BaseURL:      cfg.LLM.BaseURL,
+		ExtraHeaders: cfg.LLM.ExtraHeaders,
+	})
 }
 
 // loadConfig loads configuration from file (if provided), applies env overlays,

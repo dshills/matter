@@ -283,3 +283,124 @@ func TestApplyEnvMalformedFloat(t *testing.T) {
 		t.Error("expected error for malformed MATTER_AGENT_MAX_COST_USD")
 	}
 }
+
+func TestApplyEnvLLMNewFields(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("MATTER_LLM_API_KEY", "test-key")
+	t.Setenv("MATTER_LLM_BASE_URL", "https://proxy.example.com")
+	t.Setenv("MATTER_LLM_PRICING_FILE", "/tmp/pricing.json")
+	t.Setenv("MATTER_LLM_FALLBACK_COST_PER_1K", "0.005")
+
+	cfg, err := ApplyEnv(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.LLM.APIKey != "test-key" {
+		t.Errorf("APIKey = %q, want test-key", cfg.LLM.APIKey)
+	}
+	if cfg.LLM.BaseURL != "https://proxy.example.com" {
+		t.Errorf("BaseURL = %q, want https://proxy.example.com", cfg.LLM.BaseURL)
+	}
+	if cfg.LLM.PricingFile != "/tmp/pricing.json" {
+		t.Errorf("PricingFile = %q, want /tmp/pricing.json", cfg.LLM.PricingFile)
+	}
+	if cfg.LLM.FallbackCostPer1K != 0.005 {
+		t.Errorf("FallbackCostPer1K = %f, want 0.005", cfg.LLM.FallbackCostPer1K)
+	}
+}
+
+func TestApplyEnvMalformedFallbackCost(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("MATTER_LLM_FALLBACK_COST_PER_1K", "notafloat")
+	_, err := ApplyEnv(cfg)
+	if err == nil {
+		t.Error("expected error for malformed MATTER_LLM_FALLBACK_COST_PER_1K")
+	}
+}
+
+func TestRedactConfigWithKey(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LLM.APIKey = "sk-secret-key-12345"
+
+	redacted := RedactConfig(cfg)
+	if redacted.LLM.APIKey != "***" {
+		t.Errorf("redacted APIKey = %q, want ***", redacted.LLM.APIKey)
+	}
+	// Original should not be modified.
+	if cfg.LLM.APIKey != "sk-secret-key-12345" {
+		t.Errorf("original APIKey modified: %q", cfg.LLM.APIKey)
+	}
+}
+
+func TestRedactConfigEmptyKey(t *testing.T) {
+	cfg := DefaultConfig()
+	redacted := RedactConfig(cfg)
+	if redacted.LLM.APIKey != "" {
+		t.Errorf("empty APIKey should stay empty after redaction, got %q", redacted.LLM.APIKey)
+	}
+}
+
+func TestRedactConfigExtraHeaders(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LLM.ExtraHeaders = map[string]string{
+		"Authorization": "Bearer secret-token",
+		"X-Api-Key":     "sk-12345",
+		"X-Custom":      "safe-value",
+	}
+
+	redacted := RedactConfig(cfg)
+	if redacted.LLM.ExtraHeaders["Authorization"] != "***" {
+		t.Errorf("Authorization should be redacted, got %q", redacted.LLM.ExtraHeaders["Authorization"])
+	}
+	if redacted.LLM.ExtraHeaders["X-Api-Key"] != "***" {
+		t.Errorf("X-Api-Key should be redacted, got %q", redacted.LLM.ExtraHeaders["X-Api-Key"])
+	}
+	if redacted.LLM.ExtraHeaders["X-Custom"] != "safe-value" {
+		t.Errorf("X-Custom should not be redacted, got %q", redacted.LLM.ExtraHeaders["X-Custom"])
+	}
+	// Original should not be modified.
+	if cfg.LLM.ExtraHeaders["Authorization"] != "Bearer secret-token" {
+		t.Error("original ExtraHeaders should not be modified")
+	}
+}
+
+func TestLoadFromFileWithLLMNewFields(t *testing.T) {
+	yamlContent := `
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-20250514
+  api_key: file-key
+  base_url: https://proxy.test
+  pricing_file: /custom/pricing.json
+  fallback_cost_per_1k: 0.01
+  extra_headers:
+    X-Custom: value
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.LLM.APIKey != "file-key" {
+		t.Errorf("APIKey = %q, want file-key", cfg.LLM.APIKey)
+	}
+	if cfg.LLM.BaseURL != "https://proxy.test" {
+		t.Errorf("BaseURL = %q, want https://proxy.test", cfg.LLM.BaseURL)
+	}
+	if cfg.LLM.PricingFile != "/custom/pricing.json" {
+		t.Errorf("PricingFile = %q, want /custom/pricing.json", cfg.LLM.PricingFile)
+	}
+	if cfg.LLM.FallbackCostPer1K != 0.01 {
+		t.Errorf("FallbackCostPer1K = %f, want 0.01", cfg.LLM.FallbackCostPer1K)
+	}
+	if cfg.LLM.ExtraHeaders["X-Custom"] != "value" {
+		t.Errorf("ExtraHeaders[X-Custom] = %q, want value", cfg.LLM.ExtraHeaders["X-Custom"])
+	}
+}

@@ -45,10 +45,15 @@ type MemoryConfig struct {
 
 // LLMConfig controls the LLM provider.
 type LLMConfig struct {
-	Provider   string        `yaml:"provider"`
-	Model      string        `yaml:"model"`
-	Timeout    time.Duration `yaml:"timeout"`
-	MaxRetries int           `yaml:"max_retries"`
+	Provider          string            `yaml:"provider"`
+	Model             string            `yaml:"model"`
+	APIKey            string            `yaml:"api_key"`
+	BaseURL           string            `yaml:"base_url"`
+	Timeout           time.Duration     `yaml:"timeout"`
+	MaxRetries        int               `yaml:"max_retries"`
+	PricingFile       string            `yaml:"pricing_file"`
+	FallbackCostPer1K float64           `yaml:"fallback_cost_per_1k"`
+	ExtraHeaders      map[string]string `yaml:"extra_headers"`
 }
 
 // ToolsConfig controls which tool categories are enabled.
@@ -142,10 +147,16 @@ func ApplyEnv(cfg Config) (Config, error) {
 	}
 	cfg.LLM.Provider = envString("MATTER_LLM_PROVIDER", cfg.LLM.Provider)
 	cfg.LLM.Model = envString("MATTER_LLM_MODEL", cfg.LLM.Model)
+	cfg.LLM.APIKey = envString("MATTER_LLM_API_KEY", cfg.LLM.APIKey)
+	cfg.LLM.BaseURL = envString("MATTER_LLM_BASE_URL", cfg.LLM.BaseURL)
 	if cfg.LLM.Timeout, err = envDuration("MATTER_LLM_TIMEOUT", cfg.LLM.Timeout); err != nil {
 		return cfg, err
 	}
 	if cfg.LLM.MaxRetries, err = envInt("MATTER_LLM_MAX_RETRIES", cfg.LLM.MaxRetries); err != nil {
+		return cfg, err
+	}
+	cfg.LLM.PricingFile = envString("MATTER_LLM_PRICING_FILE", cfg.LLM.PricingFile)
+	if cfg.LLM.FallbackCostPer1K, err = envFloat("MATTER_LLM_FALLBACK_COST_PER_1K", cfg.LLM.FallbackCostPer1K); err != nil {
 		return cfg, err
 	}
 	cfg.Tools.EnableWorkspaceRead = envBool("MATTER_TOOLS_ENABLE_WORKSPACE_READ", cfg.Tools.EnableWorkspaceRead)
@@ -197,6 +208,27 @@ func Validate(cfg Config) error {
 		return fmt.Errorf("llm model must not be empty")
 	}
 	return nil
+}
+
+// RedactConfig returns a copy of the config with sensitive fields masked.
+// Use this for logging or CLI output to prevent credential leakage.
+func RedactConfig(cfg Config) Config {
+	if cfg.LLM.APIKey != "" {
+		cfg.LLM.APIKey = "***"
+	}
+	if len(cfg.LLM.ExtraHeaders) > 0 {
+		redacted := make(map[string]string, len(cfg.LLM.ExtraHeaders))
+		for k, v := range cfg.LLM.ExtraHeaders {
+			lower := strings.ToLower(k)
+			if lower == "authorization" || lower == "x-api-key" {
+				redacted[k] = "***"
+			} else {
+				redacted[k] = v
+			}
+		}
+		cfg.LLM.ExtraHeaders = redacted
+	}
+	return cfg
 }
 
 func envInt(key string, fallback int) (int, error) {

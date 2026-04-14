@@ -1,0 +1,5 @@
+[
+  {"provider": "openai", "model": "gpt-4o", "prompt_cost_per_1k": 0.0025, "completion_cost_per_1k": 0.0100},
+  {"provider": "openai", "model": "gpt-4o-mini", "prompt_cost_per_1k": 0.000150, "completion_cost_per_1k": 0.000600},
+  {"provider": "anthropic", "model": "claude-sonnet-4-20250514", "prompt_cost_per_1k": 0.003, "completion_cost_per_1k": 0.015}
+]
