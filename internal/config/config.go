@@ -20,6 +20,7 @@ type Config struct {
 	Sandbox SandboxConfig `yaml:"sandbox"`
 	Observe ObserveConfig `yaml:"observe"`
 	Server  ServerConfig  `yaml:"server"`
+	Storage StorageConfig `yaml:"storage"`
 }
 
 // PlannerConfig controls planner behavior.
@@ -110,6 +111,15 @@ type ServerConfig struct {
 	MaxPausedRuns     int           `yaml:"max_paused_runs"`
 	RunRetention      time.Duration `yaml:"run_retention"`
 	AuthToken         string        `yaml:"auth_token"`
+}
+
+// StorageConfig controls the persistent storage backend.
+type StorageConfig struct {
+	Backend         string        `yaml:"backend"`          // "sqlite" or "memory"
+	Path            string        `yaml:"path"`             // SQLite file path
+	Retention       time.Duration `yaml:"retention"`        // how long completed runs are kept
+	PausedRetention time.Duration `yaml:"paused_retention"` // how long paused runs are kept
+	GCInterval      time.Duration `yaml:"gc_interval"`      // how often retention cleanup runs
 }
 
 // ObserveConfig controls logging and run recording.
@@ -247,6 +257,17 @@ func ApplyEnv(cfg Config) (Config, error) {
 	// Note: prism may flag this line as "[REDACTED]" — that is its own diff
 	// redaction of the auth token field name, not a code issue.
 	cfg.Server.AuthToken = envString("MATTER_SERVER_AUTH_TOKEN", cfg.Server.AuthToken)
+	cfg.Storage.Backend = envString("MATTER_STORAGE_BACKEND", cfg.Storage.Backend)
+	cfg.Storage.Path = envString("MATTER_STORAGE_PATH", cfg.Storage.Path)
+	if cfg.Storage.Retention, err = envDuration("MATTER_STORAGE_RETENTION", cfg.Storage.Retention); err != nil {
+		return cfg, err
+	}
+	if cfg.Storage.PausedRetention, err = envDuration("MATTER_STORAGE_PAUSED_RETENTION", cfg.Storage.PausedRetention); err != nil {
+		return cfg, err
+	}
+	if cfg.Storage.GCInterval, err = envDuration("MATTER_STORAGE_GC_INTERVAL", cfg.Storage.GCInterval); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
 }
 
@@ -271,6 +292,15 @@ func Validate(cfg Config) error {
 	}
 	if cfg.LLM.Model == "" {
 		return fmt.Errorf("llm model must not be empty")
+	}
+	if cfg.Storage.Backend != "sqlite" && cfg.Storage.Backend != "memory" {
+		return fmt.Errorf("storage backend must be \"sqlite\" or \"memory\", got %q", cfg.Storage.Backend)
+	}
+	if cfg.Storage.Backend == "sqlite" && cfg.Storage.Path == "" {
+		return fmt.Errorf("storage path must not be empty when backend is sqlite")
+	}
+	if cfg.Storage.GCInterval <= 0 {
+		return fmt.Errorf("storage gc_interval must be positive, got %s", cfg.Storage.GCInterval)
 	}
 	return nil
 }

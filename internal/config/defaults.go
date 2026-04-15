@@ -61,5 +61,12 @@ func DefaultConfig() Config {
 			MaxPausedRuns:     20,
 			RunRetention:      1 * time.Hour,
 		},
+		Storage: StorageConfig{
+			Backend:         "sqlite",
+			Path:            "~/.matter/matter.db",
+			Retention:       168 * time.Hour, // 7 days
+			PausedRetention: 24 * time.Hour,
+			GCInterval:      1 * time.Hour,
+		},
 	}
 }

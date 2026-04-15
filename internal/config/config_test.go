@@ -40,6 +40,21 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Observe.LogLevel != "info" {
 		t.Errorf("LogLevel = %q, want info", cfg.Observe.LogLevel)
 	}
+	if cfg.Storage.Backend != "sqlite" {
+		t.Errorf("Storage.Backend = %q, want sqlite", cfg.Storage.Backend)
+	}
+	if cfg.Storage.Path != "~/.matter/matter.db" {
+		t.Errorf("Storage.Path = %q, want ~/.matter/matter.db", cfg.Storage.Path)
+	}
+	if cfg.Storage.Retention != 168*time.Hour {
+		t.Errorf("Storage.Retention = %v, want 168h", cfg.Storage.Retention)
+	}
+	if cfg.Storage.PausedRetention != 24*time.Hour {
+		t.Errorf("Storage.PausedRetention = %v, want 24h", cfg.Storage.PausedRetention)
+	}
+	if cfg.Storage.GCInterval != 1*time.Hour {
+		t.Errorf("Storage.GCInterval = %v, want 1h", cfg.Storage.GCInterval)
+	}
 }
 
 func TestLoadFromFile(t *testing.T) {
@@ -402,5 +417,127 @@ llm:
 	}
 	if cfg.LLM.ExtraHeaders["X-Custom"] != "value" {
 		t.Errorf("ExtraHeaders[X-Custom] = %q, want value", cfg.LLM.ExtraHeaders["X-Custom"])
+	}
+}
+
+func TestApplyEnvStorage(t *testing.T) {
+	cfg := DefaultConfig()
+
+	t.Setenv("MATTER_STORAGE_BACKEND", "memory")
+	t.Setenv("MATTER_STORAGE_PATH", "/tmp/test.db")
+	t.Setenv("MATTER_STORAGE_RETENTION", "48h")
+	t.Setenv("MATTER_STORAGE_PAUSED_RETENTION", "12h")
+	t.Setenv("MATTER_STORAGE_GC_INTERVAL", "30m")
+
+	cfg, err := ApplyEnv(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Storage.Backend != "memory" {
+		t.Errorf("Storage.Backend = %q, want memory", cfg.Storage.Backend)
+	}
+	if cfg.Storage.Path != "/tmp/test.db" {
+		t.Errorf("Storage.Path = %q, want /tmp/test.db", cfg.Storage.Path)
+	}
+	if cfg.Storage.Retention != 48*time.Hour {
+		t.Errorf("Storage.Retention = %v, want 48h", cfg.Storage.Retention)
+	}
+	if cfg.Storage.PausedRetention != 12*time.Hour {
+		t.Errorf("Storage.PausedRetention = %v, want 12h", cfg.Storage.PausedRetention)
+	}
+	if cfg.Storage.GCInterval != 30*time.Minute {
+		t.Errorf("Storage.GCInterval = %v, want 30m", cfg.Storage.GCInterval)
+	}
+}
+
+func TestApplyEnvStorageMalformedDuration(t *testing.T) {
+	cfg := DefaultConfig()
+	t.Setenv("MATTER_STORAGE_RETENTION", "bad")
+	_, err := ApplyEnv(cfg)
+	if err == nil {
+		t.Error("expected error for malformed MATTER_STORAGE_RETENTION")
+	}
+}
+
+func TestLoadFromFileWithStorage(t *testing.T) {
+	yamlContent := `
+storage:
+  backend: memory
+  path: /var/lib/matter/matter.db
+  retention: 72h
+  paused_retention: 6h
+  gc_interval: 15m
+`
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.Storage.Backend != "memory" {
+		t.Errorf("Storage.Backend = %q, want memory", cfg.Storage.Backend)
+	}
+	if cfg.Storage.Path != "/var/lib/matter/matter.db" {
+		t.Errorf("Storage.Path = %q, want /var/lib/matter/matter.db", cfg.Storage.Path)
+	}
+	if cfg.Storage.Retention != 72*time.Hour {
+		t.Errorf("Storage.Retention = %v, want 72h", cfg.Storage.Retention)
+	}
+	if cfg.Storage.PausedRetention != 6*time.Hour {
+		t.Errorf("Storage.PausedRetention = %v, want 6h", cfg.Storage.PausedRetention)
+	}
+	if cfg.Storage.GCInterval != 15*time.Minute {
+		t.Errorf("Storage.GCInterval = %v, want 15m", cfg.Storage.GCInterval)
+	}
+}
+
+func TestValidateStorageBackend(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Storage.Backend = "postgres"
+	err := Validate(cfg)
+	if err == nil {
+		t.Error("expected error for invalid storage backend")
+	}
+}
+
+func TestValidateStorageBackendMemory(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Storage.Backend = "memory"
+	if err := Validate(cfg); err != nil {
+		t.Errorf("memory backend should be valid: %v", err)
+	}
+}
+
+func TestValidateStoragePathEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Storage.Backend = "sqlite"
+	cfg.Storage.Path = ""
+	err := Validate(cfg)
+	if err == nil {
+		t.Error("expected error for empty sqlite path")
+	}
+}
+
+func TestValidateStorageGCIntervalZero(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Storage.GCInterval = 0
+	err := Validate(cfg)
+	if err == nil {
+		t.Error("expected error for zero gc_interval")
+	}
+}
+
+func TestValidateStorageMemoryPathEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Storage.Backend = "memory"
+	cfg.Storage.Path = ""
+	if err := Validate(cfg); err != nil {
+		t.Errorf("memory backend should not require path: %v", err)
 	}
 }
