@@ -191,6 +191,38 @@ func (t *ActiveRunTracker) Remove(runID string) {
 	delete(t.runs, runID)
 }
 
+// RemoveIfStatus removes a run from the tracker only if its current status
+// matches the expected status. This prevents race conditions where a run's
+// status has changed (e.g., resumed) between checking eligibility and removal.
+// Returns true if the run was removed.
+func (t *ActiveRunTracker) RemoveIfStatus(runID string, expected RunStatus) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	run, ok := t.runs[runID]
+	if !ok {
+		return false
+	}
+
+	run.mu.Lock()
+	if run.Status != expected {
+		run.mu.Unlock()
+		return false
+	}
+
+	// Decrement the counter for the current status.
+	switch run.Status {
+	case StatusRunning:
+		t.runningCount.Add(-1)
+	case StatusPaused:
+		t.pausedCount.Add(-1)
+	}
+	run.mu.Unlock()
+
+	delete(t.runs, runID)
+	return true
+}
+
 // CountPaused returns the number of paused runs via atomic counter (O(1)).
 func (t *ActiveRunTracker) CountPaused() int {
 	return int(t.pausedCount.Load())

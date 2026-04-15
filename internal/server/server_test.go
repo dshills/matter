@@ -671,3 +671,179 @@ func TestRunPersistsToStore(t *testing.T) {
 	}
 	t.Errorf("run did not reach terminal state within timeout, status = %q", status.Status)
 }
+
+func TestGCDeletesExpiredCompletedRuns(t *testing.T) {
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+
+	cfg := newTestConfig()
+	cfg.Storage.Retention = 1 * time.Hour
+	cfg.Storage.PausedRetention = 30 * time.Minute
+	cfg.Storage.GCInterval = 1 * time.Hour
+
+	client := llm.NewMockClient(nil, nil)
+	srv := New(cfg, client, store)
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Create an old completed run (2 hours ago — past retention).
+	oldCompleted := now.Add(-2 * time.Hour)
+	_ = store.CreateRun(ctx, &storage.RunRow{
+		RunID:       "old-completed",
+		Status:      "completed",
+		Task:        "old task",
+		CreatedAt:   oldCompleted,
+		UpdatedAt:   oldCompleted,
+		CompletedAt: &oldCompleted,
+	})
+
+	// Create a recent completed run (10 minutes ago — within retention).
+	recentCompleted := now.Add(-10 * time.Minute)
+	_ = store.CreateRun(ctx, &storage.RunRow{
+		RunID:       "recent-completed",
+		Status:      "completed",
+		Task:        "recent task",
+		CreatedAt:   recentCompleted,
+		UpdatedAt:   recentCompleted,
+		CompletedAt: &recentCompleted,
+	})
+
+	// Run GC.
+	srv.gcOnce(now)
+
+	// Old completed run should be deleted.
+	_, err := store.GetRun(ctx, "old-completed")
+	if err == nil {
+		t.Error("expected old-completed run to be deleted")
+	}
+
+	// Recent completed run should still exist.
+	run, err := store.GetRun(ctx, "recent-completed")
+	if err != nil {
+		t.Fatalf("recent-completed should still exist: %v", err)
+	}
+	if run.Status != "completed" {
+		t.Errorf("status = %q, want completed", run.Status)
+	}
+}
+
+func TestGCDeletesExpiredPausedRunsAndCleansTracker(t *testing.T) {
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+
+	cfg := newTestConfig()
+	cfg.Storage.Retention = 1 * time.Hour
+	cfg.Storage.PausedRetention = 30 * time.Minute
+	cfg.Storage.GCInterval = 1 * time.Hour
+
+	client := llm.NewMockClient(nil, nil)
+	srv := New(cfg, client, store)
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Create an old paused run (1 hour ago — past paused retention of 30min).
+	oldPausedTime := now.Add(-1 * time.Hour)
+	_ = store.CreateRun(ctx, &storage.RunRow{
+		RunID:     "old-paused",
+		Status:    "paused",
+		Task:      "old paused task",
+		Question:  "answer?",
+		CreatedAt: oldPausedTime,
+		UpdatedAt: oldPausedTime,
+	})
+
+	// Add the paused run to the tracker to simulate in-memory state.
+	// Add expects StatusRunning (it increments runningCount), then
+	// transition to paused to get the counters right.
+	pausedRun := &ActiveRun{
+		RunID:  "old-paused",
+		Status: StatusRunning,
+	}
+	_ = srv.tracker.Add(pausedRun)
+	pausedRun.mu.Lock()
+	srv.tracker.TransitionStatus(pausedRun, StatusPaused)
+	pausedRun.mu.Unlock()
+
+	// Create a recent paused run (5 minutes ago — within retention).
+	recentPausedTime := now.Add(-5 * time.Minute)
+	_ = store.CreateRun(ctx, &storage.RunRow{
+		RunID:     "recent-paused",
+		Status:    "paused",
+		Task:      "recent paused task",
+		Question:  "answer?",
+		CreatedAt: recentPausedTime,
+		UpdatedAt: recentPausedTime,
+	})
+
+	// Verify tracker has the paused run.
+	if srv.tracker.Get("old-paused") == nil {
+		t.Fatal("expected old-paused in tracker before GC")
+	}
+
+	// Run GC.
+	srv.gcOnce(now)
+
+	// Old paused run should be removed from tracker.
+	if srv.tracker.Get("old-paused") != nil {
+		t.Error("expected old-paused to be removed from tracker after GC")
+	}
+
+	// Old paused run should be deleted from store.
+	_, err := store.GetRun(ctx, "old-paused")
+	if err == nil {
+		t.Error("expected old-paused run to be deleted from store")
+	}
+
+	// Recent paused run should still exist.
+	run, err := store.GetRun(ctx, "recent-paused")
+	if err != nil {
+		t.Fatalf("recent-paused should still exist: %v", err)
+	}
+	if run.Status != "paused" {
+		t.Errorf("status = %q, want paused", run.Status)
+	}
+
+	// Paused counter should reflect the removal.
+	// We started with 1 paused in tracker (old-paused), GC removed it.
+	if srv.tracker.CountPaused() != 0 {
+		t.Errorf("paused count = %d, want 0", srv.tracker.CountPaused())
+	}
+}
+
+func TestGCPreservesRunningRuns(t *testing.T) {
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+
+	cfg := newTestConfig()
+	cfg.Storage.Retention = 1 * time.Hour
+	cfg.Storage.PausedRetention = 30 * time.Minute
+
+	client := llm.NewMockClient(nil, nil)
+	srv := New(cfg, client, store)
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Create an old running run — should NOT be deleted by GC.
+	oldRunning := now.Add(-2 * time.Hour)
+	_ = store.CreateRun(ctx, &storage.RunRow{
+		RunID:     "old-running",
+		Status:    "running",
+		Task:      "still running",
+		CreatedAt: oldRunning,
+		UpdatedAt: oldRunning,
+	})
+
+	srv.gcOnce(now)
+
+	// Running run should still exist regardless of age.
+	run, err := store.GetRun(ctx, "old-running")
+	if err != nil {
+		t.Fatalf("old-running should still exist: %v", err)
+	}
+	if run.Status != "running" {
+		t.Errorf("status = %q, want running", run.Status)
+	}
+}

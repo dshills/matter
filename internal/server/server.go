@@ -132,6 +132,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // runGC periodically garbage-collects expired runs from the store.
+// Before deleting expired paused runs, it removes them from the
+// ActiveRunTracker to prevent stale resume attempts and keep the
+// paused counter accurate.
 func (s *Server) runGC() {
 	interval := s.cfg.Storage.GCInterval
 	if interval <= 0 {
@@ -145,16 +148,48 @@ func (s *Server) runGC() {
 		case <-s.gcDone:
 			return
 		case now := <-ticker.C:
-			completedBefore := now.Add(-s.cfg.Storage.Retention)
-			pausedBefore := now.Add(-s.cfg.Storage.PausedRetention)
-			removed, err := s.store.DeleteExpiredRuns(context.Background(), completedBefore, pausedBefore)
-			if err != nil {
-				log.Printf("GC: error deleting expired runs: %v", err)
-			}
-			if removed > 0 {
-				log.Printf("GC: removed %d expired runs", removed)
+			s.gcOnce(now)
+		}
+	}
+}
+
+// gcOnce runs a single GC cycle. Extracted for testability.
+func (s *Server) gcOnce(now time.Time) {
+	ctx := context.Background()
+	completedBefore := now.Add(-s.cfg.Storage.Retention)
+	pausedBefore := now.Add(-s.cfg.Storage.PausedRetention)
+
+	// Remove expired paused runs from the in-memory tracker before
+	// deleting them from the store. This prevents stale resume attempts
+	// and keeps the paused counter accurate. Paginate to handle stores
+	// with more than 200 paused runs.
+	const pageSize = 200
+	for offset := 0; ; offset += pageSize {
+		pausedRuns, err := s.store.ListRuns(ctx, storage.RunFilter{
+			Status: "paused",
+			Limit:  pageSize,
+			Offset: offset,
+		})
+		if err != nil {
+			log.Printf("GC: error listing paused runs: %v", err)
+			break
+		}
+		for _, run := range pausedRuns {
+			if run.UpdatedAt.Before(pausedBefore) {
+				s.tracker.RemoveIfStatus(run.RunID, StatusPaused)
 			}
 		}
+		if len(pausedRuns) < pageSize {
+			break
+		}
+	}
+
+	removed, err := s.store.DeleteExpiredRuns(ctx, completedBefore, pausedBefore)
+	if err != nil {
+		log.Printf("GC: error deleting expired runs: %v", err)
+	}
+	if removed > 0 {
+		log.Printf("GC: removed %d expired runs", removed)
 	}
 }
 
