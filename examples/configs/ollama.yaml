@@ -1,0 +1,25 @@
+# Local Ollama configuration (no API key needed)
+# Requires Ollama running locally: https://ollama.ai
+#
+# Pull a model first:
+#   ollama pull llama3.1
+#
+# Usage:
+#   matter run --task "Summarize the README" --workspace ./my-project --config examples/configs/ollama.yaml
+
+llm:
+  provider: ollama
+  model: llama3.1
+  timeout: 120s   # longer timeout for model loading
+  max_retries: 2
+
+agent:
+  max_steps: 10
+  max_duration: 5m
+  max_cost_usd: 0   # local models have no cost
+
+tools:
+  enable_workspace_read: true
+  enable_workspace_write: false
+  enable_web_fetch: false
+  enable_command_exec: false

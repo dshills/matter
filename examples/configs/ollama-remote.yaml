@@ -1,0 +1,22 @@
+# Remote Ollama configuration
+# Connect to an Ollama instance running on another machine.
+#
+# Usage:
+#   matter run --task "Analyze this code" --workspace . --config examples/configs/ollama-remote.yaml
+
+llm:
+  provider: ollama-remote
+  model: llama3.1
+  base_url: http://192.168.1.100:11434   # remote Ollama host
+  timeout: 120s
+  max_retries: 2
+
+agent:
+  max_steps: 10
+  max_duration: 5m
+
+tools:
+  enable_workspace_read: true
+  enable_workspace_write: false
+  enable_web_fetch: false
+  enable_command_exec: false

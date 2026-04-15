@@ -1,0 +1,48 @@
+# Production server configuration
+# Runs the matter HTTP API server with authentication, persistent storage,
+# and conservative resource limits.
+#
+# Usage:
+#   export OPENAI_API_KEY=sk-...
+#   export MATTER_SERVER_AUTH_TOKEN=your-secret-token
+#   matter-server --config examples/configs/server-production.yaml
+
+llm:
+  provider: openai
+  model: gpt-4o
+  timeout: 30s
+  max_retries: 3
+
+agent:
+  max_steps: 30
+  max_duration: 5m
+  max_total_tokens: 100000
+  max_cost_usd: 5.00
+  max_consecutive_errors: 3
+  max_repeated_tool_calls: 3
+  max_asks: 5
+
+tools:
+  enable_workspace_read: true
+  enable_workspace_write: true
+  enable_web_fetch: true
+  enable_command_exec: false
+  web_fetch_allowed_domains:
+    - api.github.com
+
+server:
+  listen_addr: ":8080"
+  max_concurrent_runs: 5
+  max_paused_runs: 10
+
+storage:
+  backend: sqlite
+  path: /var/lib/matter/matter.db
+  retention: 168h          # keep completed runs for 7 days
+  paused_retention: 24h    # expire paused runs after 1 day
+  gc_interval: 1h
+
+observe:
+  log_level: info
+  record_runs: true
+  record_dir: /var/lib/matter/runs

@@ -1,0 +1,23 @@
+# OpenAI configuration
+# Set OPENAI_API_KEY environment variable before running.
+#
+# Usage:
+#   export OPENAI_API_KEY=sk-...
+#   matter run --task "Analyze the codebase" --workspace ./my-project --config examples/configs/openai.yaml
+
+llm:
+  provider: openai
+  model: gpt-4o
+  timeout: 30s
+  max_retries: 3
+
+agent:
+  max_steps: 20
+  max_duration: 2m
+  max_cost_usd: 3.00
+
+tools:
+  enable_workspace_read: true
+  enable_workspace_write: false
+  enable_web_fetch: false
+  enable_command_exec: false

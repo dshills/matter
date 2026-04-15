@@ -1,0 +1,58 @@
+# Full-featured code assistant configuration
+# Enables all tools including command execution (restricted to safe commands).
+#
+# Usage:
+#   export OPENAI_API_KEY=sk-...
+#   matter run --task "Run the tests and fix any failures" --workspace ./my-project --config examples/configs/code-assistant.yaml
+
+llm:
+  provider: openai
+  model: gpt-4o
+  timeout: 30s
+  max_retries: 3
+
+agent:
+  max_steps: 30
+  max_duration: 5m
+  max_total_tokens: 100000
+  max_cost_usd: 5.00
+  max_consecutive_errors: 3
+  max_repeated_tool_calls: 3
+  max_asks: 3
+
+memory:
+  recent_messages: 10
+  summarize_after_messages: 15
+  summarize_after_tokens: 16000
+  summarization_model: gpt-4o-mini
+  max_tool_result_chars: 8000
+
+planner:
+  prompt_prefix: "You are an expert software engineer."
+  prompt_suffix: "Always explain your reasoning before making changes."
+  max_plan_steps: 5
+
+tools:
+  enable_workspace_read: true
+  enable_workspace_write: true
+  enable_web_fetch: false
+  enable_command_exec: true
+  command_allowlist:
+    - go
+    - git
+    - make
+    # Note: npm and pip can execute arbitrary code via install scripts.
+    # Only include them if you trust the workspace contents.
+    - npm
+    - node
+    - python3
+    - pip
+
+sandbox:
+  command_timeout: 30s
+  max_output_bytes: 2097152   # 2 MB
+
+observe:
+  log_level: info
+  record_runs: true
+  record_dir: .matter/runs

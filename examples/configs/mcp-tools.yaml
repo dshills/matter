@@ -1,0 +1,38 @@
+# MCP external tool server configuration
+# Connects to MCP-compatible tool servers to extend the agent's capabilities.
+# See: https://modelcontextprotocol.io
+#
+# Usage:
+#   export OPENAI_API_KEY=sk-...
+#   matter run --task "Use the database tool to query users" --workspace . --config examples/configs/mcp-tools.yaml
+
+llm:
+  provider: openai
+  model: gpt-4o
+  timeout: 30s
+
+agent:
+  max_steps: 20
+  max_duration: 3m
+  max_cost_usd: 3.00
+
+tools:
+  enable_workspace_read: true
+  enable_workspace_write: true
+  enable_web_fetch: false
+  enable_command_exec: false
+  mcp_servers:
+    # Stdio transport -- launches a subprocess
+    - name: my-tools
+      transport: stdio
+      command: my-mcp-server
+      args: ["--verbose"]
+      env:
+        DATABASE_URL: "postgres://localhost:5432/mydb"
+      timeout: 10s
+
+    # SSE transport -- connects to an HTTP server
+    - name: remote-tools
+      transport: sse
+      url: http://localhost:3001/sse
+      timeout: 10s
