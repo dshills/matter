@@ -23,9 +23,12 @@ type ProviderFactory func(cfg ProviderConfig) (Client, error)
 
 // providers maps provider names to factories.
 var providers = map[string]ProviderFactory{
-	"mock":      newMockClientFromConfig,
-	"openai":    newOpenAIClient,
-	"anthropic": newAnthropicClient,
+	"mock":          newMockClientFromConfig,
+	"openai":        newOpenAIClient,
+	"anthropic":     newAnthropicClient,
+	"gemini":        newGeminiClient,
+	"ollama":        newOllamaLocalClient,
+	"ollama-remote": newOllamaRemoteClient,
 }
 
 // RegisterProvider adds a provider factory to the registry.
@@ -55,8 +58,11 @@ func ResolveAPIKey(provider, configKey string) string {
 
 	// 2. Provider-specific env var
 	providerEnvVars := map[string]string{
-		"openai":    "OPENAI_API_KEY",
-		"anthropic": "ANTHROPIC_API_KEY",
+		"openai":        "OPENAI_API_KEY",
+		"anthropic":     "ANTHROPIC_API_KEY",
+		"gemini":        "GEMINI_API_KEY",
+		"ollama":        "OLLAMA_API_KEY",
+		"ollama-remote": "OLLAMA_API_KEY",
 	}
 	if envVar, ok := providerEnvVars[provider]; ok {
 		if key := os.Getenv(envVar); key != "" {

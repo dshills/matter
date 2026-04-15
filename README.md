@@ -7,7 +7,7 @@ matter accepts a task, enters an autonomous agent loop (plan via LLM, execute to
 ## Features
 
 - **Autonomous execution** -- step-based agent loop with structured tool calls, not interactive chat
-- **Real LLM providers** -- OpenAI and Anthropic integrations with credential chain resolution, retry/backoff, and cost tracking
+- **Real LLM providers** -- OpenAI, Anthropic, Gemini, and Ollama (local + remote) with credential chain resolution, retry/backoff, and cost tracking
 - **Safety controls** -- resource budgets (steps, duration, tokens, cost, consecutive errors, repeated tool calls) plus workspace confinement and policy enforcement
 - **Built-in tools** -- file read/write, web fetch (with domain allowlist and SSRF protection), command execution (with allowlist and restricted environment)
 - **MCP tool support** -- connect external tools via Model Context Protocol (stdio and SSE transports)
@@ -56,6 +56,13 @@ matter run --task "Analyze the codebase" --workspace ./my-project
 
 # Run a task with Anthropic
 export ANTHROPIC_API_KEY=sk-ant-...
+matter run --task "Analyze the codebase" --workspace ./my-project --config config.yaml
+
+# Run a task with Gemini
+export GEMINI_API_KEY=AI...
+matter run --task "Analyze the codebase" --workspace ./my-project --config config.yaml
+
+# Run a task with local Ollama (no API key needed)
 matter run --task "Analyze the codebase" --workspace ./my-project --config config.yaml
 
 # Print the effective configuration
@@ -148,10 +155,11 @@ planner:
   prompt_suffix: "Explain your reasoning."
 
 llm:
-  provider: openai   # openai, anthropic, or mock
+  provider: openai   # openai, anthropic, gemini, ollama, ollama-remote, or mock
   model: gpt-4o
-  api_key: ""        # or set OPENAI_API_KEY / ANTHROPIC_API_KEY env var
-  timeout: 30s
+  api_key: ""        # or set OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY env var
+  base_url: ""       # optional: override API endpoint (required for ollama-remote)
+  timeout: 30s       # ollama defaults to 120s for model loading
   max_retries: 3
 
 tools:
@@ -273,7 +281,7 @@ matter can connect to external [Model Context Protocol](https://modelcontextprot
 | `internal/agent` | Agent loop coordinator with lifecycle management, limit enforcement, and conversation mode (pause/resume) |
 | `internal/planner` | LLM decision engine producing typed decisions (tool call, complete, fail, ask_user, plan) with JSON repair pipeline |
 | `internal/memory` | Context management with sliding message window and automatic summarization |
-| `internal/llm` | Provider-abstracted LLM client (OpenAI, Anthropic, mock) with retry, backoff, and cost estimation |
+| `internal/llm` | Provider-abstracted LLM client (OpenAI, Anthropic, Gemini, Ollama, mock) with retry, backoff, and cost estimation |
 | `internal/tools` | Tool registry, executor, and JSON Schema input validation |
 | `internal/tools/builtin` | Built-in tool implementations (workspace_read/write, web_fetch, command_exec) |
 | `internal/tools/mcp` | MCP client and tool adapter (stdio and SSE transports) |
@@ -446,7 +454,6 @@ matter v2 is complete. All planned features are implemented: real LLM providers 
 - `matter replay` command for replaying recorded runs
 - Public `pkg/` API for embedding as a library
 - Persistent run storage for the HTTP server (currently ephemeral)
-- Additional LLM providers
 
 ## License
 
