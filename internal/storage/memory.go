@@ -204,6 +204,7 @@ func (m *MemoryStore) IncrementMetrics(_ context.Context, delta MetricsDelta) er
 	m.metrics.TotalTokens += delta.TotalTokens
 	m.metrics.TotalCostUSD += delta.TotalCostUSD
 	m.metrics.DurationMS += delta.DurationMS
+	m.metrics.ToolDurationMS += delta.ToolDurationMS
 	m.metrics.UpdatedAt = time.Now()
 	return nil
 }

@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     total_tokens    INTEGER NOT NULL DEFAULT 0,
     total_cost      REAL NOT NULL DEFAULT 0.0,
     duration_ms     INTEGER NOT NULL DEFAULT 0,
+    tool_duration_ms INTEGER NOT NULL DEFAULT 0,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -402,13 +403,14 @@ func (s *SQLiteStore) IncrementMetrics(ctx context.Context, delta MetricsDelta) 
 			total_tokens = total_tokens + ?,
 			total_cost = total_cost + ?,
 			duration_ms = duration_ms + ?,
+			tool_duration_ms = tool_duration_ms + ?,
 			updated_at = ?
 		WHERE id = 1`,
 		delta.RunsStarted, delta.RunsCompleted, delta.RunsFailed,
 		delta.ToolCalls, delta.ToolFailures,
 		delta.LLMCalls, delta.LLMFailures,
 		delta.StepCount, delta.TotalTokens, delta.TotalCostUSD,
-		delta.DurationMS, time.Now().UTC(),
+		delta.DurationMS, delta.ToolDurationMS, time.Now().UTC(),
 	)
 	if err != nil {
 		return fmt.Errorf("increment metrics: %w", err)
@@ -421,12 +423,12 @@ func (s *SQLiteStore) GetMetrics(ctx context.Context) (*MetricsRow, error) {
 	err := s.db.QueryRowContext(ctx, `
 		SELECT runs_started, runs_completed, runs_failed,
 			tool_calls, tool_failures, llm_calls, llm_failures,
-			step_count, total_tokens, total_cost, duration_ms, updated_at
+			step_count, total_tokens, total_cost, duration_ms, tool_duration_ms, updated_at
 		FROM metrics WHERE id = 1`).Scan(
 		&m.RunsStarted, &m.RunsCompleted, &m.RunsFailed,
 		&m.ToolCalls, &m.ToolFailures, &m.LLMCalls, &m.LLMFailures,
 		&m.StepCount, &m.TotalTokens, &m.TotalCostUSD, &m.DurationMS,
-		&m.UpdatedAt,
+		&m.ToolDurationMS, &m.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get metrics: %w", err)

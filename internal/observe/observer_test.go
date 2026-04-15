@@ -2,12 +2,14 @@ package observe
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dshills/matter/internal/config"
+	"github.com/dshills/matter/internal/storage"
 )
 
 func testObserverCfg() config.ObserveConfig {
@@ -280,5 +282,134 @@ func TestConcurrentRunSessions(t *testing.T) {
 	}
 	if snap.TotalTokens != 300 {
 		t.Errorf("TotalTokens = %d, want 300", snap.TotalTokens)
+	}
+}
+
+func TestMetricsFlushToStore(t *testing.T) {
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+
+	m := NewMetrics()
+	m.SetStore(store)
+	defer m.Close()
+
+	m.IncRunsStarted()
+	m.IncRunsCompleted()
+	m.IncToolCalls()
+	m.AddTokens(500)
+	m.AddCost(0.03)
+
+	// Flush to store.
+	m.FlushToStore()
+
+	// Verify store has the metrics.
+	ctx := context.Background()
+	stored, err := store.GetMetrics(ctx)
+	if err != nil {
+		t.Fatalf("GetMetrics: %v", err)
+	}
+	if stored.RunsStarted != 1 {
+		t.Errorf("store RunsStarted = %d, want 1", stored.RunsStarted)
+	}
+	if stored.RunsCompleted != 1 {
+		t.Errorf("store RunsCompleted = %d, want 1", stored.RunsCompleted)
+	}
+	if stored.ToolCalls != 1 {
+		t.Errorf("store ToolCalls = %d, want 1", stored.ToolCalls)
+	}
+	if stored.TotalTokens != 500 {
+		t.Errorf("store TotalTokens = %d, want 500", stored.TotalTokens)
+	}
+}
+
+func TestMetricsSurviveRestart(t *testing.T) {
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+
+	// First metrics instance writes some data.
+	m1 := NewMetrics()
+	m1.SetStore(store)
+	m1.IncRunsStarted()
+	m1.IncRunsStarted()
+	m1.IncRunsCompleted()
+	m1.AddTokens(1000)
+	m1.FlushToStore()
+	m1.Close()
+
+	// Second metrics instance loads from store (simulates restart).
+	m2 := NewMetrics()
+	m2.SetStore(store)
+	defer m2.Close()
+
+	snap := m2.Snapshot()
+	if snap.RunsStarted != 2 {
+		t.Errorf("after restart RunsStarted = %d, want 2", snap.RunsStarted)
+	}
+	if snap.RunsCompleted != 1 {
+		t.Errorf("after restart RunsCompleted = %d, want 1", snap.RunsCompleted)
+	}
+	if snap.TotalTokens != 1000 {
+		t.Errorf("after restart TotalTokens = %d, want 1000", snap.TotalTokens)
+	}
+}
+
+func TestMetricsFlushOnEndRun(t *testing.T) {
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+
+	var buf bytes.Buffer
+	obs := NewObserver(testObserverCfg(), &buf)
+	obs.SetStore(store)
+	defer obs.Close()
+
+	session := obs.StartRun("run-flush", "test", config.DefaultConfig(), nil)
+	session.PlannerStarted(1)
+	session.PlannerCompleted(1, 200, 0.01, 500*time.Millisecond)
+	session.EndRun(true, "done", 1, time.Second, 200, 0.01)
+
+	// Metrics should be flushed to store after EndRun.
+	ctx := context.Background()
+	stored, err := store.GetMetrics(ctx)
+	if err != nil {
+		t.Fatalf("GetMetrics: %v", err)
+	}
+	if stored.RunsStarted != 1 {
+		t.Errorf("store RunsStarted = %d, want 1", stored.RunsStarted)
+	}
+	if stored.RunsCompleted != 1 {
+		t.Errorf("store RunsCompleted = %d, want 1", stored.RunsCompleted)
+	}
+}
+
+func TestRecorderWritesStepsToStore(t *testing.T) {
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+
+	// Create a run in the store so AppendStep has a parent.
+	ctx := context.Background()
+	_ = store.CreateRun(ctx, &storage.RunRow{
+		RunID:     "run-rec",
+		Status:    "running",
+		Task:      "test",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	})
+
+	var buf bytes.Buffer
+	obs := NewObserver(testObserverCfg(), &buf)
+	obs.SetStore(store)
+	defer obs.Close()
+
+	session := obs.StartRun("run-rec", "test", config.DefaultConfig(), nil)
+	session.PlannerCompleted(1, 100, 0.01, time.Millisecond)
+	session.ToolCompleted(1, "read", 50*time.Millisecond, "")
+
+	// Steps should be in the store.
+	steps, err := store.GetSteps(ctx, "run-rec")
+	if err != nil {
+		t.Fatalf("GetSteps: %v", err)
+	}
+	if len(steps) != 2 {
+		t.Errorf("steps = %d, want 2", len(steps))
 	}
 }

@@ -1,14 +1,17 @@
 package observe
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/dshills/matter/internal/config"
+	"github.com/dshills/matter/internal/storage"
 )
 
 // StepRecord captures a single step in the run recording.
@@ -85,11 +88,14 @@ type OutcomeRecord struct {
 	TotalCost   float64       `json:"total_cost_usd"`
 }
 
-// Recorder writes run records to disk as JSON files.
+// Recorder writes run records to disk as JSON files and optionally
+// persists steps to a storage.Store.
 type Recorder struct {
 	mu        sync.Mutex
 	record    RunRecord
 	recordDir string
+	store     storage.Store
+	runID     string
 }
 
 // NewRecorder creates a recorder for the given run.
@@ -102,21 +108,63 @@ func NewRecorder(runID, task string, cfg config.Config, recordDir string) *Recor
 			StartTime: time.Now(),
 		},
 		recordDir: recordDir,
+		runID:     runID,
 	}
 }
 
-// RecordStep adds a step to the run record.
-func (r *Recorder) RecordStep(step StepRecord) {
+// SetStore configures a persistent store for step recording.
+// When set, RecordStep writes each step to the store incrementally.
+func (r *Recorder) SetStore(store storage.Store) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.record.Steps = append(r.record.Steps, step)
+	r.store = store
 }
 
-// SetOutcome sets the final outcome of the run.
+// RecordStep adds a step to the run record and optionally writes it
+// to the store. Store errors are logged but do not affect the run.
+func (r *Recorder) RecordStep(step StepRecord) {
+	r.mu.Lock()
+	r.record.Steps = append(r.record.Steps, step)
+	store := r.store
+	runID := r.runID
+	r.mu.Unlock()
+
+	if store != nil {
+		toolInputJSON := ""
+		if step.ToolInput != nil {
+			data, err := json.Marshal(step.ToolInput)
+			if err != nil {
+				log.Printf("recorder: failed to marshal tool input for step %d run %s: %v", step.Step, runID, err)
+			} else {
+				toolInputJSON = string(data)
+			}
+		}
+		row := &storage.StepRow{
+			StepNumber:  step.Step,
+			Timestamp:   step.Timestamp,
+			Decision:    step.Decision,
+			ToolName:    step.ToolName,
+			ToolInput:   toolInputJSON,
+			ToolOutput:  step.ToolOutput,
+			ToolError:   step.ToolError,
+			RawResponse: step.RawResponse,
+			Tokens:      step.Tokens,
+			CostUSD:     step.CostUSD,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := store.AppendStep(ctx, runID, row); err != nil {
+			log.Printf("recorder: failed to persist step %d for run %s: %v", step.Step, runID, err)
+		}
+	}
+}
+
+// SetOutcome sets the final outcome of the run and updates the store
+// if one is configured.
 func (r *Recorder) SetOutcome(success bool, summary string, steps int, duration time.Duration, tokens int, cost float64) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.record.EndTime = time.Now()
+	now := time.Now()
+	r.record.EndTime = now
 	r.record.Outcome = OutcomeRecord{
 		Success:     success,
 		Summary:     summary,
@@ -124,6 +172,33 @@ func (r *Recorder) SetOutcome(success bool, summary string, steps int, duration 
 		Duration:    duration,
 		TotalTokens: tokens,
 		TotalCost:   cost,
+	}
+	store := r.store
+	runID := r.runID
+	r.mu.Unlock()
+
+	if store != nil {
+		status := "completed"
+		if !success {
+			status = "failed"
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := store.UpdateRun(ctx, &storage.RunRow{
+			RunID:        runID,
+			Status:       status,
+			Summary:      summary,
+			Success:      &success,
+			CompletedAt:  &now,
+			Steps:        steps,
+			TotalTokens:  tokens,
+			TotalCostUSD: cost,
+			DurationMS:   duration.Milliseconds(),
+			UpdatedAt:    now,
+		})
+		if err != nil {
+			log.Printf("recorder: failed to update run %s outcome in store: %v", runID, err)
+		}
 	}
 }
 
@@ -135,6 +210,7 @@ func (r *Recorder) SetTraceEvents(events []TraceEvent) {
 }
 
 // Flush writes the run record to disk as a JSON file.
+// This is retained for backward compatibility alongside store persistence.
 func (r *Recorder) Flush() error {
 	r.mu.Lock()
 	rec := r.record

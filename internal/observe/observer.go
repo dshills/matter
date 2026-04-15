@@ -1,11 +1,16 @@
 package observe
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"sync"
 	"time"
 
 	"github.com/dshills/matter/internal/config"
+	"github.com/dshills/matter/internal/storage"
 	"github.com/dshills/matter/pkg/matter"
 )
 
@@ -15,6 +20,10 @@ type Observer struct {
 	Logger  *Logger
 	Metrics *Metrics
 	cfg     config.ObserveConfig
+
+	mu        sync.Mutex
+	store     storage.Store
+	storeOnce sync.Once
 }
 
 // NewObserver creates an observer with shared subsystems initialized.
@@ -25,6 +34,24 @@ func NewObserver(cfg config.ObserveConfig, logOut io.Writer) *Observer {
 		Metrics: NewMetrics(),
 		cfg:     cfg,
 	}
+}
+
+// SetStore configures a persistent store for metrics and step recording.
+// Metrics are loaded from the store and a background flush ticker is started.
+// SetStore is idempotent — only the first call takes effect, matching
+// the behavior of Metrics.SetStore.
+func (o *Observer) SetStore(store storage.Store) {
+	o.storeOnce.Do(func() {
+		o.mu.Lock()
+		o.store = store
+		o.mu.Unlock()
+		o.Metrics.SetStore(store)
+	})
+}
+
+// Close stops background goroutines and flushes any pending data.
+func (o *Observer) Close() {
+	o.Metrics.Close()
 }
 
 // StartRun creates a new per-run session with its own tracer and optional recorder.
@@ -38,9 +65,34 @@ func (o *Observer) StartRun(runID, task string, cfgSnapshot config.Config, progr
 	o.Logger.SetRunID(runID)
 	o.Metrics.IncRunsStarted()
 
+	o.mu.Lock()
+	st := o.store
+	o.mu.Unlock()
+
 	var rec *Recorder
-	if o.cfg.RecordRuns {
+	if o.cfg.RecordRuns || st != nil {
 		rec = NewRecorder(runID, task, cfgSnapshot, o.cfg.RecordDir)
+		if st != nil {
+			rec.SetStore(st)
+			// Ensure the run exists in the store so AppendStep has a parent.
+			// Ignore ErrConflict — the server path may have already created it.
+			now := time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			err := st.CreateRun(ctx, &storage.RunRow{
+				RunID:     runID,
+				Status:    "running",
+				Task:      task,
+				CreatedAt: now,
+				UpdatedAt: now,
+			})
+			if err != nil {
+				var conflict *storage.ErrConflict
+				if !errors.As(err, &conflict) {
+					log.Printf("observer: failed to create run %s in store: %v", runID, err)
+				}
+			}
+		}
 	}
 
 	o.Logger.Info(0, "agent", "run started", map[string]any{
@@ -49,12 +101,13 @@ func (o *Observer) StartRun(runID, task string, cfgSnapshot config.Config, progr
 	})
 
 	s := &RunSession{
-		runID:      runID,
-		logger:     o.Logger,
-		tracer:     NewTracer(runID),
-		metrics:    o.Metrics,
-		rec:        rec,
-		progressFn: progressFn,
+		runID:        runID,
+		logger:       o.Logger,
+		tracer:       NewTracer(runID),
+		metrics:      o.Metrics,
+		rec:          rec,
+		progressFn:   progressFn,
+		recordToFile: o.cfg.RecordRuns,
 	}
 
 	// Emit run_started event and invoke progress callback.
@@ -76,12 +129,13 @@ func (o *Observer) StartRun(runID, task string, cfgSnapshot config.Config, progr
 // and Recorder while sharing the Observer's Logger and Metrics.
 // All methods are safe for concurrent use.
 type RunSession struct {
-	runID      string
-	logger     *Logger
-	tracer     *Tracer
-	metrics    *Metrics
-	rec        *Recorder
-	progressFn matter.ProgressFunc
+	runID        string
+	logger       *Logger
+	tracer       *Tracer
+	metrics      *Metrics
+	rec          *Recorder
+	progressFn   matter.ProgressFunc
+	recordToFile bool // true when JSON file recording is enabled
 }
 
 // Tracer returns the session's tracer for direct access in tests.
@@ -171,13 +225,20 @@ func (s *RunSession) EndRun(success bool, summary string, steps int, duration ti
 		"cost":     cost,
 	})
 
+	// Flush metrics deltas to store on run completion.
+	s.metrics.FlushToStore()
+
 	if s.rec != nil {
 		s.rec.SetOutcome(success, summary, steps, duration, tokens, cost)
 		s.rec.SetTraceEvents(s.tracer.Events())
-		if err := s.rec.Flush(); err != nil {
-			s.logger.Error(steps, "recorder", "failed to write run record", map[string]any{
-				"error": err.Error(),
-			})
+		// Only write JSON file if RecordRuns is enabled (backward compat).
+		// Store-based step persistence happens incrementally in RecordStep.
+		if s.recordToFile {
+			if err := s.rec.Flush(); err != nil {
+				s.logger.Error(steps, "recorder", "failed to write run record", map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
 	}
 }

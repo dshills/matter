@@ -101,33 +101,35 @@ type RunFilter struct {
 
 // MetricsDelta holds incremental metric updates.
 type MetricsDelta struct {
-	RunsStarted   int
-	RunsCompleted int
-	RunsFailed    int
-	ToolCalls     int
-	ToolFailures  int
-	LLMCalls      int
-	LLMFailures   int
-	StepCount     int
-	TotalTokens   int
-	TotalCostUSD  float64
-	DurationMS    int64
+	RunsStarted    int
+	RunsCompleted  int
+	RunsFailed     int
+	ToolCalls      int
+	ToolFailures   int
+	LLMCalls       int
+	LLMFailures    int
+	StepCount      int
+	TotalTokens    int
+	TotalCostUSD   float64
+	DurationMS     int64
+	ToolDurationMS int64
 }
 
 // MetricsRow holds the global aggregate metrics.
 type MetricsRow struct {
-	RunsStarted   int
-	RunsCompleted int
-	RunsFailed    int
-	ToolCalls     int
-	ToolFailures  int
-	LLMCalls      int
-	LLMFailures   int
-	StepCount     int
-	TotalTokens   int
-	TotalCostUSD  float64
-	DurationMS    int64
-	UpdatedAt     time.Time
+	RunsStarted    int
+	RunsCompleted  int
+	RunsFailed     int
+	ToolCalls      int
+	ToolFailures   int
+	LLMCalls       int
+	LLMFailures    int
+	StepCount      int
+	TotalTokens    int
+	TotalCostUSD   float64
+	DurationMS     int64
+	ToolDurationMS int64
+	UpdatedAt      time.Time
 }
 
 // ErrNotFound is returned when a requested resource does not exist.
