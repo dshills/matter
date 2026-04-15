@@ -11,15 +11,16 @@ matter accepts a task, enters an autonomous agent loop (plan via LLM, execute to
 - **Safety controls** -- resource budgets (steps, duration, tokens, cost, consecutive errors, repeated tool calls) plus workspace confinement and policy enforcement
 - **Built-in tools** -- file read/write, web fetch (with domain allowlist and SSRF protection), command execution (with allowlist and restricted environment)
 - **MCP tool support** -- connect external tools via Model Context Protocol (stdio and SSE transports)
-- **HTTP API server** -- REST API with async run management, SSE event streaming, bearer token auth, and graceful shutdown
-- **Conversation mode** -- pause/resume runs for human-in-the-loop interactions (ask_user decision type)
+- **HTTP API server** -- REST API with async run management, SSE event streaming, bearer token auth, persistent run history, and graceful shutdown
+- **Conversation mode** -- pause/resume runs for human-in-the-loop interactions, including across server restarts via agent state serialization
 - **Multi-step planning** -- agents can plan and execute sequences of tool calls in a single LLM response
 - **Progress callbacks** -- real-time event streaming for step progress, tool calls, and run lifecycle
 - **Configurable prompts** -- customizable system prompt with prefix/suffix overrides and file-based templates
-- **Observability** -- structured JSON logging, per-step tracing, in-memory metrics, run recording for replay
+- **Persistent storage** -- SQLite-backed run history, metrics, and agent snapshots survive server restarts; pluggable backend (SQLite or in-memory)
+- **Observability** -- structured JSON logging, per-step tracing, durable metrics, run recording for replay
 - **Memory management** -- sliding message window with automatic LLM-driven summarization
 - **Deterministic testing** -- first-class mock LLM client for reproducible test runs
-- **Minimal dependencies** -- Go standard library plus YAML parsing and JSON Schema validation
+- **Minimal dependencies** -- Go standard library plus YAML parsing, JSON Schema validation, and pure-Go SQLite (no CGO)
 
 ## Requirements
 
@@ -197,7 +198,13 @@ server:                      # matter-server settings
   auth_token: ""             # or set MATTER_SERVER_AUTH_TOKEN env var
   max_concurrent_runs: 10
   max_paused_runs: 20
-  run_retention: 1h
+
+storage:                     # persistent storage (matter-server)
+  backend: sqlite            # sqlite or memory
+  path: ~/.matter/matter.db  # SQLite database file path (~ is expanded to home dir)
+  retention: 168h            # how long completed/failed runs are kept (7 days)
+  paused_retention: 24h      # how long paused runs are kept before GC
+  gc_interval: 1h            # how often retention cleanup runs
 ```
 
 ### Environment variables
@@ -209,6 +216,8 @@ export MATTER_AGENT_MAX_STEPS=50
 export MATTER_LLM_MODEL=gpt-4o-mini
 export MATTER_TOOLS_ENABLE_COMMAND_EXEC=true
 export MATTER_OBSERVE_LOG_LEVEL=debug
+export MATTER_STORAGE_BACKEND=sqlite
+export MATTER_STORAGE_PATH=~/.matter/matter.db
 ```
 
 ## Built-in tools
@@ -285,8 +294,9 @@ matter can connect to external [Model Context Protocol](https://modelcontextprot
 | `internal/tools` | Tool registry, executor, and JSON Schema input validation |
 | `internal/tools/builtin` | Built-in tool implementations (workspace_read/write, web_fetch, command_exec) |
 | `internal/tools/mcp` | MCP client and tool adapter (stdio and SSE transports) |
-| `internal/server` | HTTP API server with async run management, SSE event streaming, and bearer token auth |
-| `internal/observe` | Structured logging, event tracing, metrics counters, run recording, progress callbacks |
+| `internal/server` | HTTP API server with async run management, SSE event streaming, bearer token auth, and run lifecycle persistence |
+| `internal/storage` | Pluggable persistent storage (SQLite and in-memory backends) for runs, steps, events, and metrics |
+| `internal/observe` | Structured logging, event tracing, durable metrics, run recording, progress callbacks |
 | `internal/policy` | Budget enforcement, filesystem confinement, tool restrictions |
 | `internal/config` | Configuration loading (file + env overlay), validation, defaults |
 | `internal/workspace` | Path safety (traversal prevention, symlink escape, workspace confinement) |
@@ -305,7 +315,7 @@ Each run follows this flow:
    - If **plan**: execute each step sequentially (multi-step planning)
    - If **ask_user**: pause the run and wait for human input (conversation mode)
    - If **complete** or **fail**: return result
-3. **Finalize** -- record run trace, flush metrics, write run record to disk
+3. **Finalize** -- record run trace, flush metrics to persistent store, write run record
 
 ### Key design decisions
 
@@ -317,10 +327,12 @@ Each run follows this flow:
 - **Restricted subprocess environment** -- command_exec runs with only PATH, HOME, and TMPDIR set; optional allowlist restricts available commands
 - **Constant-time auth** -- HTTP server uses `crypto/subtle.ConstantTimeCompare` for bearer token validation
 - **Cryptographic run IDs** -- `crypto/rand` for unpredictable run identifiers
+- **Cross-restart resume** -- paused agent state (memory, metrics, loop detector) serialized to SQLite for recovery after server restart
+- **Automatic data retention** -- GC goroutine periodically cleans expired completed and paused runs from the store
 
 ## HTTP API server
 
-`matter-server` exposes agent runs over HTTP with async execution and SSE event streaming.
+`matter-server` exposes agent runs over HTTP with async execution, SSE event streaming, and persistent storage. Run history, metrics, and paused agent state survive server restarts via SQLite.
 
 ```bash
 # Start with defaults
@@ -447,13 +459,12 @@ make help
 
 ## Project status
 
-matter v2 is complete. All planned features are implemented: real LLM providers (OpenAI, Anthropic), configurable prompts, command allowlist, progress callbacks, conversation mode, multi-step planning, MCP tool support, and HTTP API server.
+matter v2 with persistent storage is complete. All planned features are implemented: real LLM providers (OpenAI, Anthropic, Gemini, Ollama), configurable prompts, command allowlist, progress callbacks, conversation mode, multi-step planning, MCP tool support, HTTP API server, and SQLite-backed persistent storage with cross-restart pause/resume.
 
 ### Roadmap
 
 - `matter replay` command for replaying recorded runs
 - Public `pkg/` API for embedding as a library
-- Persistent run storage for the HTTP server (currently ephemeral)
 
 ## License
 
