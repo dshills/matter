@@ -12,6 +12,7 @@ import (
 
 	"github.com/dshills/matter/internal/config"
 	"github.com/dshills/matter/internal/llm"
+	"github.com/dshills/matter/internal/storage"
 )
 
 // Version is the server version reported in /health.
@@ -21,7 +22,8 @@ const Version = "0.2.0"
 type Server struct {
 	cfg       config.Config
 	llmClient llm.Client
-	store     *RunStore
+	store     storage.Store
+	tracker   *ActiveRunTracker
 	mux       *http.ServeMux
 	server    *http.Server
 	gcDone    chan struct{}
@@ -31,17 +33,17 @@ type Server struct {
 }
 
 // New creates a new HTTP API server.
-func New(cfg config.Config, llmClient llm.Client) *Server {
-	store := NewRunStore(
+func New(cfg config.Config, llmClient llm.Client, store storage.Store) *Server {
+	tracker := NewActiveRunTracker(
 		cfg.Server.MaxConcurrentRuns,
 		cfg.Server.MaxPausedRuns,
-		cfg.Server.RunRetention,
 	)
 
 	s := &Server{
 		cfg:       cfg,
 		llmClient: llmClient,
 		store:     store,
+		tracker:   tracker,
 		mux:       http.NewServeMux(),
 		gcDone:    make(chan struct{}),
 	}
@@ -61,8 +63,45 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/tools", s.requireAuth(s.handleListTools))
 }
 
+// reconcileOnStartup transitions any previously-running runs to failed
+// and initializes the paused counter from the store.
+func (s *Server) reconcileOnStartup() {
+	ctx := context.Background()
+
+	// Fail any runs that were running when the server last stopped.
+	runningRuns, err := s.store.ListRuns(ctx, storage.RunFilter{Status: "running", Limit: 200})
+	if err != nil {
+		log.Printf("startup reconciliation: failed to list running runs: %v", err)
+	}
+	for _, run := range runningRuns {
+		run.Status = "failed"
+		run.ErrorMessage = "server restarted"
+		now := time.Now()
+		run.CompletedAt = &now
+		run.UpdatedAt = now
+		if err := s.store.UpdateRun(ctx, &run); err != nil {
+			log.Printf("startup reconciliation: failed to update run %s: %v", run.RunID, err)
+		}
+	}
+	if len(runningRuns) > 0 {
+		log.Printf("startup reconciliation: marked %d stale running runs as failed", len(runningRuns))
+	}
+
+	// Initialize the paused counter from persisted data.
+	pausedRuns, err := s.store.ListRuns(ctx, storage.RunFilter{Status: "paused", Limit: 200})
+	if err != nil {
+		log.Printf("startup reconciliation: failed to count paused runs: %v", err)
+	}
+	if len(pausedRuns) > 0 {
+		s.tracker.SetPausedCount(len(pausedRuns))
+		log.Printf("startup reconciliation: found %d paused runs", len(pausedRuns))
+	}
+}
+
 // ListenAndServe starts the server and blocks until it's shut down.
 func (s *Server) ListenAndServe() error {
+	s.reconcileOnStartup()
+
 	s.server = &http.Server{
 		Addr:              s.cfg.Server.ListenAddr,
 		Handler:           s.requestLogging(s.mux),
@@ -72,7 +111,7 @@ func (s *Server) ListenAndServe() error {
 	// Start GC ticker.
 	go s.runGC()
 
-	log.Printf("matter-server listening on %s (ephemeral storage — run data is lost on restart)", s.cfg.Server.ListenAddr)
+	log.Printf("matter-server listening on %s", s.cfg.Server.ListenAddr)
 	return s.server.ListenAndServe()
 }
 
@@ -83,20 +122,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	close(s.gcDone)
 
 	// Cancel all active runs.
-	s.store.CancelAll()
+	s.tracker.CancelAll()
 
 	// Stop accepting new HTTP requests and drain existing connections.
-	// 30s is sufficient for in-flight HTTP responses to complete after
-	// all runs have been cancelled above.
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	return s.server.Shutdown(shutdownCtx)
 }
 
-// runGC periodically garbage-collects expired runs.
+// runGC periodically garbage-collects expired runs from the store.
 func (s *Server) runGC() {
-	ticker := time.NewTicker(30 * time.Second)
+	interval := s.cfg.Storage.GCInterval
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -104,7 +145,12 @@ func (s *Server) runGC() {
 		case <-s.gcDone:
 			return
 		case now := <-ticker.C:
-			removed := s.store.GC(now)
+			completedBefore := now.Add(-s.cfg.Storage.Retention)
+			pausedBefore := now.Add(-s.cfg.Storage.PausedRetention)
+			removed, err := s.store.DeleteExpiredRuns(context.Background(), completedBefore, pausedBefore)
+			if err != nil {
+				log.Printf("GC: error deleting expired runs: %v", err)
+			}
 			if removed > 0 {
 				log.Printf("GC: removed %d expired runs", removed)
 			}
@@ -167,9 +213,9 @@ func (s *Server) Handler() http.Handler {
 	return s.requestLogging(s.mux)
 }
 
-// Store returns the run store for testing.
-func (s *Server) Store() *RunStore {
-	return s.store
+// Tracker returns the active run tracker for testing.
+func (s *Server) Tracker() *ActiveRunTracker {
+	return s.tracker
 }
 
 // writeJSON writes a JSON response with the given status code.

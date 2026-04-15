@@ -22,15 +22,13 @@ const (
 	StatusPaused    RunStatus = "paused"
 )
 
-// ActiveRun tracks the state of an in-flight or completed run.
+// ActiveRun tracks the ephemeral state of an in-flight run.
+// Persistent data (result, events, steps) is stored via storage.Store.
 type ActiveRun struct {
-	mu      sync.Mutex
-	RunID   string
-	Status  RunStatus
-	Result  *matter.RunResult
-	Cancel  context.CancelFunc
-	Events  []matter.ProgressEvent
-	Created time.Time
+	mu     sync.Mutex
+	RunID  string
+	Status RunStatus
+	Cancel context.CancelFunc
 
 	// Runner is kept alive for paused runs so Resume can use it.
 	// Set to nil after the run completes/fails/is cancelled.
@@ -123,10 +121,10 @@ func isTerminalEvent(event string) bool {
 	return event == "run_completed" || event == "run_failed"
 }
 
-// RunStore is a thread-safe store for active, paused, and completed runs.
-// Running and paused counts are tracked with atomic counters to avoid
-// O(N) iteration on every new run or pause check.
-type RunStore struct {
+// ActiveRunTracker is a thread-safe tracker for in-flight and paused runs.
+// It manages only ephemeral state: cancel functions, SSE subscribers, and
+// running/paused counters. Persistent run data lives in storage.Store.
+type ActiveRunTracker struct {
 	mu   sync.Mutex
 	runs map[string]*ActiveRun
 
@@ -135,81 +133,103 @@ type RunStore struct {
 
 	maxConcurrent int
 	maxPaused     int
-	retention     time.Duration
 }
 
-// NewRunStore creates a run store with the given limits.
-func NewRunStore(maxConcurrent, maxPaused int, retention time.Duration) *RunStore {
-	return &RunStore{
+// NewActiveRunTracker creates a tracker with the given concurrency limits.
+func NewActiveRunTracker(maxConcurrent, maxPaused int) *ActiveRunTracker {
+	return &ActiveRunTracker{
 		runs:          make(map[string]*ActiveRun),
 		maxConcurrent: maxConcurrent,
 		maxPaused:     maxPaused,
-		retention:     retention,
 	}
 }
 
-// Add registers a new run. Returns an error if the concurrent run limit
-// is reached. Uses an atomic counter for O(1) concurrency checks.
-func (s *RunStore) Add(run *ActiveRun) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Add registers a new active run. Returns an error if the concurrent run
+// limit is reached. Uses an atomic counter for O(1) concurrency checks.
+func (t *ActiveRunTracker) Add(run *ActiveRun) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	if int(s.runningCount.Load()) >= s.maxConcurrent {
-		return fmt.Errorf("concurrent run limit reached (%d)", s.maxConcurrent)
+	if int(t.runningCount.Load()) >= t.maxConcurrent {
+		return fmt.Errorf("concurrent run limit reached (%d)", t.maxConcurrent)
 	}
 
-	s.runs[run.RunID] = run
-	s.runningCount.Add(1)
+	t.runs[run.RunID] = run
+	t.runningCount.Add(1)
 	return nil
 }
 
-// Get returns the run with the given ID, or nil if not found.
-func (s *RunStore) Get(runID string) *ActiveRun {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.runs[runID]
+// Get returns the active run with the given ID, or nil if not tracked.
+func (t *ActiveRunTracker) Get(runID string) *ActiveRun {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.runs[runID]
+}
+
+// Remove removes a run from the tracker. Used when a run reaches a terminal
+// state and its ephemeral resources should be released.
+func (t *ActiveRunTracker) Remove(runID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	run, ok := t.runs[runID]
+	if !ok {
+		return
+	}
+
+	// Adjust counters before removing.
+	run.mu.Lock()
+	switch run.Status {
+	case StatusRunning:
+		t.runningCount.Add(-1)
+	case StatusPaused:
+		t.pausedCount.Add(-1)
+	}
+	run.mu.Unlock()
+
+	delete(t.runs, runID)
 }
 
 // CountPaused returns the number of paused runs via atomic counter (O(1)).
-func (s *RunStore) CountPaused() int {
-	return int(s.pausedCount.Load())
+func (t *ActiveRunTracker) CountPaused() int {
+	return int(t.pausedCount.Load())
 }
 
 // TransitionStatus atomically updates a run's status and adjusts the
 // running/paused counters accordingly. Caller must hold run.mu.
-func (s *RunStore) TransitionStatus(run *ActiveRun, newStatus RunStatus) {
-	s.transitionLocked(run, newStatus)
+func (t *ActiveRunTracker) TransitionStatus(run *ActiveRun, newStatus RunStatus) {
+	t.transitionLocked(run, newStatus)
 }
 
 // TryPause atomically checks the paused run limit and transitions the
 // run to StatusPaused if under the limit. Returns false if the limit
 // would be exceeded. Caller must hold run.mu.
-func (s *RunStore) TryPause(run *ActiveRun) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (t *ActiveRunTracker) TryPause(run *ActiveRun) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	if int(s.pausedCount.Load()) >= s.maxPaused {
+	if int(t.pausedCount.Load()) >= t.maxPaused {
 		return false
 	}
-	s.transitionLocked(run, StatusPaused)
+	t.transitionLocked(run, StatusPaused)
 	return true
 }
 
 // TryResume atomically checks the concurrent run limit and transitions
 // the run from StatusPaused to StatusRunning. Returns false if the limit
 // would be exceeded. Caller must hold run.mu.
-func (s *RunStore) TryResume(run *ActiveRun) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (t *ActiveRunTracker) TryResume(run *ActiveRun) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	if int(s.runningCount.Load()) >= s.maxConcurrent {
+	if int(t.runningCount.Load()) >= t.maxConcurrent {
 		return false
 	}
-	s.transitionLocked(run, StatusRunning)
+	t.transitionLocked(run, StatusRunning)
 	return true
 }
 
-func (s *RunStore) transitionLocked(run *ActiveRun, newStatus RunStatus) {
+func (t *ActiveRunTracker) transitionLocked(run *ActiveRun, newStatus RunStatus) {
 	oldStatus := run.Status
 	if oldStatus == newStatus {
 		return
@@ -219,126 +239,39 @@ func (s *RunStore) transitionLocked(run *ActiveRun, newStatus RunStatus) {
 	// Decrement old counter.
 	switch oldStatus {
 	case StatusRunning:
-		s.runningCount.Add(-1)
+		t.runningCount.Add(-1)
 	case StatusPaused:
-		s.pausedCount.Add(-1)
+		t.pausedCount.Add(-1)
 	}
 
 	// Increment new counter.
 	switch newStatus {
 	case StatusRunning:
-		s.runningCount.Add(1)
+		t.runningCount.Add(1)
 	case StatusPaused:
-		s.pausedCount.Add(1)
+		t.pausedCount.Add(1)
 	}
-}
-
-// AllRunning returns all runs with status "running".
-func (s *RunStore) AllRunning() []*ActiveRun {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var result []*ActiveRun
-	for _, r := range s.runs {
-		r.mu.Lock()
-		if r.Status == StatusRunning {
-			result = append(result, r)
-		}
-		r.mu.Unlock()
-	}
-	return result
-}
-
-// gcCandidate holds the info needed to decide whether to remove a run.
-type gcCandidate struct {
-	id      string
-	run     *ActiveRun
-	status  RunStatus
-	created time.Time
-}
-
-// GC removes completed, failed, and cancelled runs older than the retention
-// period. Paused runs are cancelled and removed if they've been paused longer
-// than the retention period. The store lock is held only briefly to snapshot
-// candidates, avoiding contention with request handlers.
-func (s *RunStore) GC(now time.Time) int {
-	// Phase 1: snapshot candidates under the store lock.
-	s.mu.Lock()
-	candidates := make([]gcCandidate, 0, len(s.runs))
-	for id, r := range s.runs {
-		r.mu.Lock()
-		candidates = append(candidates, gcCandidate{
-			id:      id,
-			run:     r,
-			status:  r.Status,
-			created: r.Created,
-		})
-		r.mu.Unlock()
-	}
-	s.mu.Unlock()
-
-	// Phase 2: identify which runs to remove (no locks held).
-	var toRemove []gcCandidate
-	for _, c := range candidates {
-		switch c.status {
-		case StatusCompleted, StatusFailed, StatusCancelled:
-			if now.Sub(c.created) > s.retention {
-				toRemove = append(toRemove, c)
-			}
-		case StatusPaused:
-			if now.Sub(c.created) > s.retention {
-				toRemove = append(toRemove, c)
-			}
-		}
-	}
-
-	if len(toRemove) == 0 {
-		return 0
-	}
-
-	// Phase 3: remove under store lock.
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	removed := 0
-	for _, c := range toRemove {
-		r := c.run
-		r.mu.Lock()
-		// Re-check status — it may have changed between phases.
-		switch r.Status {
-		case StatusCompleted, StatusFailed, StatusCancelled:
-			if now.Sub(r.Created) > s.retention {
-				delete(s.runs, c.id)
-				removed++
-			}
-		case StatusPaused:
-			if now.Sub(r.Created) > s.retention {
-				if r.Cancel != nil {
-					r.Cancel()
-				}
-				s.transitionLocked(r, StatusCancelled)
-				delete(s.runs, c.id)
-				removed++
-			}
-		}
-		r.mu.Unlock()
-	}
-	return removed
 }
 
 // CancelAll cancels all running and paused runs. Used during graceful shutdown.
-func (s *RunStore) CancelAll() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (t *ActiveRunTracker) CancelAll() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
-	for _, r := range s.runs {
+	for _, r := range t.runs {
 		r.mu.Lock()
 		if r.Status == StatusRunning || r.Status == StatusPaused {
 			if r.Cancel != nil {
 				r.Cancel()
 			}
-			s.TransitionStatus(r, StatusCancelled)
+			t.TransitionStatus(r, StatusCancelled)
 		}
 		r.mu.Unlock()
 	}
+}
+
+// SetPausedCount sets the initial paused count (used for startup reconciliation
+// when loading paused run count from the store).
+func (t *ActiveRunTracker) SetPausedCount(n int) {
+	t.pausedCount.Store(int32(n))
 }

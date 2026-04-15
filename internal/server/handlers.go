@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/dshills/matter/internal/runner"
+	"github.com/dshills/matter/internal/storage"
 	"github.com/dshills/matter/pkg/matter"
 )
 
@@ -74,6 +77,7 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runID := generateRunID()
+	now := time.Now()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -85,26 +89,51 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Persist the run in the store.
+	runRow := &storage.RunRow{
+		RunID:     runID,
+		Status:    "running",
+		Task:      req.Task,
+		Workspace: req.Workspace,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.store.CreateRun(r.Context(), runRow); err != nil {
+		cancel()
+		log.Printf("failed to persist run: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to create run")
+		return
+	}
+
 	activeRun := &ActiveRun{
-		RunID:   runID,
-		Status:  StatusRunning,
-		Cancel:  cancel,
-		Created: time.Now(),
-		Runner:  rn,
+		RunID:  runID,
+		Status: StatusRunning,
+		Cancel: cancel,
+		Runner: rn,
 	}
 
 	// Set up progress callback to broadcast events to SSE subscribers
-	// and store events for late-joining subscribers.
+	// and persist events to the store.
 	rn.SetProgressFunc(func(event matter.ProgressEvent) {
 		event.RunID = runID
-		activeRun.mu.Lock()
-		activeRun.Events = append(activeRun.Events, event)
-		activeRun.mu.Unlock()
+		// Persist event to store (best-effort).
+		data, _ := json.Marshal(event.Data)
+		if err := s.store.AppendEvent(context.Background(), runID, &storage.EventRow{
+			Type:      event.Event,
+			Data:      string(data),
+			Timestamp: event.Timestamp,
+		}); err != nil {
+			log.Printf("failed to persist event for run %s: %v", runID, err)
+		}
 		activeRun.broadcast(event)
 	})
 
-	if err := s.store.Add(activeRun); err != nil {
+	if err := s.tracker.Add(activeRun); err != nil {
 		cancel()
+		// Clean up the persisted run.
+		runRow.Status = "failed"
+		runRow.ErrorMessage = err.Error()
+		_ = s.store.UpdateRun(r.Context(), runRow)
 		writeError(w, http.StatusTooManyRequests, err.Error())
 		return
 	}
@@ -118,45 +147,49 @@ func (s *Server) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// executeRun runs the agent task and updates the ActiveRun state on completion.
-// Terminal progress events are normally emitted by the runner via the progress
-// callback (which calls broadcast). As a safety net, we also broadcast a
-// terminal event here to ensure SSE subscribers are closed even if the runner
-// does not emit one.
+// executeRun runs the agent task and updates state on completion.
 func (s *Server) executeRun(ctx context.Context, rn *runner.Runner, run *ActiveRun, req createRunRequest) {
 	result := rn.Run(ctx, matter.RunRequest{
 		Task:      req.Task,
 		Workspace: req.Workspace,
 	})
 
+	now := time.Now()
+
 	run.mu.Lock()
-	run.Result = &result
 
 	if result.Paused {
 		// Atomically check paused limit and transition.
-		if !s.store.TryPause(run) {
+		if !s.tracker.TryPause(run) {
 			if run.Cancel != nil {
 				run.Cancel()
 			}
-			s.store.TransitionStatus(run, StatusCancelled)
-			run.Result = &matter.RunResult{
-				Error: fmt.Errorf("paused run limit reached (%d)", s.store.maxPaused),
-			}
+			s.tracker.TransitionStatus(run, StatusCancelled)
 			run.Runner = nil
 			run.mu.Unlock()
+
+			// Update store.
+			s.updateRunFromResult(run.RunID, &matter.RunResult{
+				Error: fmt.Errorf("paused run limit reached (%d)", s.tracker.maxPaused),
+			}, "failed", now)
+			s.tracker.Remove(run.RunID)
+
 			run.broadcast(matter.ProgressEvent{
 				RunID:     run.RunID,
 				Event:     "run_failed",
-				Timestamp: time.Now(),
+				Timestamp: now,
 			})
 			return
 		}
-		// Keep Runner and context alive for Resume.
+		// Keep Runner alive for Resume. Update store with paused state.
 		run.mu.Unlock()
+
+		s.updateRunPaused(run.RunID, result, now)
+
 		run.broadcast(matter.ProgressEvent{
 			RunID:     run.RunID,
 			Event:     "run_paused",
-			Timestamp: time.Now(),
+			Timestamp: now,
 		})
 		return
 	}
@@ -167,66 +200,130 @@ func (s *Server) executeRun(ctx context.Context, rn *runner.Runner, run *ActiveR
 	}
 
 	var terminalEvent string
+	var status string
 	if result.Error != nil {
-		s.store.TransitionStatus(run, StatusFailed)
+		s.tracker.TransitionStatus(run, StatusFailed)
 		terminalEvent = "run_failed"
+		status = "failed"
 	} else {
-		s.store.TransitionStatus(run, StatusCompleted)
+		s.tracker.TransitionStatus(run, StatusCompleted)
 		terminalEvent = "run_completed"
+		status = "completed"
 	}
 	run.Runner = nil
 	run.mu.Unlock()
+
+	// Update persistent store and remove from tracker.
+	s.updateRunFromResult(run.RunID, &result, status, now)
+	s.tracker.Remove(run.RunID)
 
 	// Broadcast terminal event to close SSE subscribers.
 	run.broadcast(matter.ProgressEvent{
 		RunID:     run.RunID,
 		Event:     terminalEvent,
 		Step:      result.Steps,
-		Timestamp: time.Now(),
+		Timestamp: now,
 	})
+}
+
+// updateRunFromResult persists the final result of a run to the store.
+func (s *Server) updateRunFromResult(runID string, result *matter.RunResult, status string, now time.Time) {
+	ctx := context.Background()
+	stored, err := s.store.GetRun(ctx, runID)
+	if err != nil {
+		log.Printf("failed to get run %s for update: %v", runID, err)
+		return
+	}
+
+	stored.Status = status
+	stored.UpdatedAt = now
+	stored.CompletedAt = &now
+	stored.Steps = result.Steps
+	stored.TotalTokens = result.TotalTokens
+	stored.TotalCostUSD = result.TotalCostUSD
+	stored.DurationMS = now.Sub(stored.CreatedAt).Milliseconds()
+
+	if result.Error != nil {
+		stored.ErrorMessage = result.Error.Error()
+	} else {
+		stored.Success = &result.Success
+		stored.Summary = result.FinalSummary
+	}
+
+	if err := s.store.UpdateRun(ctx, stored); err != nil {
+		log.Printf("failed to update run %s: %v", runID, err)
+	}
+}
+
+// updateRunPaused persists the paused state of a run to the store.
+func (s *Server) updateRunPaused(runID string, result matter.RunResult, now time.Time) {
+	ctx := context.Background()
+	stored, err := s.store.GetRun(ctx, runID)
+	if err != nil {
+		log.Printf("failed to get run %s for pause update: %v", runID, err)
+		return
+	}
+
+	stored.Status = "paused"
+	stored.UpdatedAt = now
+	stored.Steps = result.Steps
+	stored.TotalTokens = result.TotalTokens
+	stored.TotalCostUSD = result.TotalCostUSD
+	stored.DurationMS = now.Sub(stored.CreatedAt).Milliseconds()
+	if result.Question != nil {
+		stored.Question = result.Question.Question
+	}
+
+	if err := s.store.UpdateRun(ctx, stored); err != nil {
+		log.Printf("failed to update paused run %s: %v", runID, err)
+	}
 }
 
 // handleGetRun returns the current status of a run.
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
-	run := s.store.Get(runID)
-	if run == nil {
-		writeError(w, http.StatusNotFound, "run not found")
+
+	stored, err := s.store.GetRun(r.Context(), runID)
+	if err != nil {
+		var notFound *storage.ErrNotFound
+		if errors.As(err, &notFound) {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to read run")
 		return
 	}
 
-	run.mu.Lock()
-	resp := buildRunStatusResponse(run)
-	run.mu.Unlock()
-
+	resp := buildRunStatusResponseFromStore(stored)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// buildRunStatusResponse constructs the status response from an ActiveRun.
-// Caller must hold run.mu.
-func buildRunStatusResponse(run *ActiveRun) runStatusResponse {
+// buildRunStatusResponseFromStore constructs the status response from a stored run.
+func buildRunStatusResponseFromStore(run *storage.RunRow) runStatusResponse {
 	resp := runStatusResponse{
 		RunID:  run.RunID,
-		Status: string(run.Status),
+		Status: run.Status,
+		Steps:  run.Steps,
 	}
 
-	if run.Result != nil {
-		resp.Steps = run.Result.Steps
-		resp.TotalTokens = run.Result.TotalTokens
-		resp.TotalCostUSD = run.Result.TotalCostUSD
-		resp.Duration = time.Since(run.Created).Truncate(100 * time.Millisecond).String()
+	if run.TotalTokens > 0 {
+		resp.TotalTokens = run.TotalTokens
+	}
+	if run.TotalCostUSD > 0 {
+		resp.TotalCostUSD = run.TotalCostUSD
+	}
+	if run.DurationMS > 0 {
+		resp.Duration = time.Duration(run.DurationMS * int64(time.Millisecond)).Truncate(100 * time.Millisecond).String()
+	}
 
-		if run.Status == StatusCompleted {
-			success := run.Result.Success
-			resp.Success = &success
-			resp.FinalSummary = run.Result.FinalSummary
-		}
-		if run.Status == StatusFailed && run.Result.Error != nil {
-			resp.Error = run.Result.Error.Error()
-		}
-		if run.Status == StatusPaused && run.Result.Question != nil {
-			resp.Question = run.Result.Question.Question
-		}
+	switch run.Status {
+	case "completed":
+		resp.Success = run.Success
+		resp.FinalSummary = run.Summary
+	case "failed":
+		resp.Error = run.ErrorMessage
+	case "paused":
+		resp.Question = run.Question
 	}
 
 	return resp
@@ -235,9 +332,16 @@ func buildRunStatusResponse(run *ActiveRun) runStatusResponse {
 // handleRunEvents streams SSE events for a run.
 func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
-	run := s.store.Get(runID)
-	if run == nil {
-		writeError(w, http.StatusNotFound, "run not found")
+
+	// Check the run exists in the store.
+	stored, err := s.store.GetRun(r.Context(), runID)
+	if err != nil {
+		var notFound *storage.ErrNotFound
+		if errors.As(err, &notFound) {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to read run")
 		return
 	}
 
@@ -246,32 +350,38 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 
-	// Subscribe while holding the lock so no events are missed between
-	// copying existing events and subscribing for new ones.
-	run.mu.Lock()
-	existing := make([]matter.ProgressEvent, len(run.Events))
-	copy(existing, run.Events)
-	terminated := run.Status == StatusCompleted || run.Status == StatusFailed || run.Status == StatusCancelled
-	ch := run.Subscribe()
-	run.mu.Unlock()
-	defer run.Unsubscribe(ch)
-
-	for _, event := range existing {
-		if err := writeSSEEvent(w, event); err != nil {
+	// Replay historical events from the store.
+	events, err := s.store.GetEvents(r.Context(), runID, 0)
+	if err != nil {
+		log.Printf("failed to get events for run %s: %v", runID, err)
+	}
+	for _, ev := range events {
+		pe := eventRowToProgressEvent(ev, runID)
+		if err := writeSSEEvent(w, pe); err != nil {
 			return
 		}
 	}
 
-	// If the run is already done, close the stream.
+	// If the run is already terminal, no need to subscribe for live events.
+	terminated := stored.Status == "completed" || stored.Status == "failed" || stored.Status == "cancelled"
 	if terminated {
 		return
 	}
+
+	// Subscribe for live events from the tracker.
+	active := s.tracker.Get(runID)
+	if active == nil {
+		// Run completed between the store read and now.
+		return
+	}
+
+	ch := active.Subscribe()
+	defer active.Unsubscribe(ch)
 
 	for {
 		select {
 		case event, ok := <-ch:
 			if !ok {
-				// Channel closed — run completed.
 				return
 			}
 			if err := writeSSEEvent(w, event); err != nil {
@@ -283,31 +393,68 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// eventRowToProgressEvent converts a stored event to a ProgressEvent.
+func eventRowToProgressEvent(ev storage.EventRow, runID string) matter.ProgressEvent {
+	pe := matter.ProgressEvent{
+		RunID:     runID,
+		Event:     ev.Type,
+		Timestamp: ev.Timestamp,
+	}
+	if ev.Data != "" {
+		var data map[string]any
+		if err := json.Unmarshal([]byte(ev.Data), &data); err == nil {
+			pe.Data = data
+		}
+	}
+	return pe
+}
+
 // handleCancelRun cancels a running or paused run.
 func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
-	run := s.store.Get(runID)
-	if run == nil {
-		writeError(w, http.StatusNotFound, "run not found")
+
+	// Check the run exists in the store.
+	stored, err := s.store.GetRun(r.Context(), runID)
+	if err != nil {
+		var notFound *storage.ErrNotFound
+		if errors.As(err, &notFound) {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to read run")
 		return
 	}
 
-	run.mu.Lock()
-	defer run.mu.Unlock()
-
-	switch run.Status {
-	case StatusRunning, StatusPaused:
-		if run.Cancel != nil {
-			run.Cancel()
+	switch stored.Status {
+	case "running", "paused":
+		// Cancel via tracker if active.
+		active := s.tracker.Get(runID)
+		if active != nil {
+			active.mu.Lock()
+			if active.Cancel != nil {
+				active.Cancel()
+			}
+			s.tracker.TransitionStatus(active, StatusCancelled)
+			active.Runner = nil
+			active.mu.Unlock()
+			s.tracker.Remove(runID)
 		}
-		s.store.TransitionStatus(run, StatusCancelled)
-		run.Runner = nil
+
+		// Update store.
+		now := time.Now()
+		stored.Status = "cancelled"
+		stored.UpdatedAt = now
+		stored.CompletedAt = &now
+		if err := s.store.UpdateRun(r.Context(), stored); err != nil {
+			log.Printf("failed to update cancelled run %s: %v", runID, err)
+		}
+
 		writeJSON(w, http.StatusOK, map[string]string{
 			"run_id": runID,
-			"status": string(StatusCancelled),
+			"status": "cancelled",
 		})
-	case StatusCompleted, StatusFailed, StatusCancelled:
-		writeError(w, http.StatusConflict, fmt.Sprintf("run already %s", run.Status))
+	case "completed", "failed", "cancelled":
+		writeError(w, http.StatusConflict, fmt.Sprintf("run already %s", stored.Status))
 	default:
 		writeError(w, http.StatusConflict, "cannot cancel run in current state")
 	}
@@ -316,9 +463,11 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 // handleAnswer resumes a paused run with the user's answer.
 func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
-	run := s.store.Get(runID)
-	if run == nil {
-		writeError(w, http.StatusNotFound, "run not found")
+
+	// Look up in tracker (paused runs must be active).
+	active := s.tracker.Get(runID)
+	if active == nil {
+		writeError(w, http.StatusNotFound, "run not found or not active")
 		return
 	}
 
@@ -333,46 +482,59 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run.mu.Lock()
-	if run.Status != StatusPaused {
-		run.mu.Unlock()
-		writeError(w, http.StatusConflict, fmt.Sprintf("run is %s, not paused", run.Status))
+	active.mu.Lock()
+	if active.Status != StatusPaused {
+		active.mu.Unlock()
+		writeError(w, http.StatusConflict, fmt.Sprintf("run is %s, not paused", active.Status))
 		return
 	}
-	if run.Runner == nil {
-		run.mu.Unlock()
+	if active.Runner == nil {
+		active.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, "runner not available for resume")
 		return
 	}
 
 	// Atomically check concurrent run limit and transition to running.
-	if !s.store.TryResume(run) {
-		run.mu.Unlock()
-		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("concurrent run limit reached (%d)", s.store.maxConcurrent))
+	if !s.tracker.TryResume(active) {
+		active.mu.Unlock()
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("concurrent run limit reached (%d)", s.tracker.maxConcurrent))
 		return
 	}
 
-	rn := run.Runner
+	rn := active.Runner
 
 	// Create a new cancel context for the resumed run.
 	ctx, cancel := context.WithCancel(context.Background())
-	run.Cancel = cancel
-	run.mu.Unlock()
+	active.Cancel = cancel
+	active.mu.Unlock()
+
+	// Update store status.
+	storeCtx := context.Background()
+	stored, err := s.store.GetRun(storeCtx, runID)
+	if err == nil {
+		stored.Status = "running"
+		stored.UpdatedAt = time.Now()
+		stored.Question = ""
+		_ = s.store.UpdateRun(storeCtx, stored)
+	}
 
 	// Resume in a background goroutine.
 	go func() {
 		result := rn.Resume(ctx, req.Answer)
+		now := time.Now()
 
-		run.mu.Lock()
-		run.Result = &result
+		active.mu.Lock()
 
 		if result.Paused {
-			s.store.TransitionStatus(run, StatusPaused)
-			run.mu.Unlock()
-			run.broadcast(matter.ProgressEvent{
-				RunID:     run.RunID,
+			s.tracker.TransitionStatus(active, StatusPaused)
+			active.mu.Unlock()
+
+			s.updateRunPaused(runID, result, now)
+
+			active.broadcast(matter.ProgressEvent{
+				RunID:     runID,
 				Event:     "run_paused",
-				Timestamp: time.Now(),
+				Timestamp: now,
 			})
 			return
 		}
@@ -381,22 +543,27 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		cancel()
 
 		var terminalEvent string
+		var status string
 		if result.Error != nil {
-			s.store.TransitionStatus(run, StatusFailed)
+			s.tracker.TransitionStatus(active, StatusFailed)
 			terminalEvent = "run_failed"
+			status = "failed"
 		} else {
-			s.store.TransitionStatus(run, StatusCompleted)
+			s.tracker.TransitionStatus(active, StatusCompleted)
 			terminalEvent = "run_completed"
+			status = "completed"
 		}
-		run.Runner = nil
-		run.mu.Unlock()
+		active.Runner = nil
+		active.mu.Unlock()
 
-		// Broadcast terminal event to close SSE subscribers.
-		run.broadcast(matter.ProgressEvent{
-			RunID:     run.RunID,
+		s.updateRunFromResult(runID, &result, status, now)
+		s.tracker.Remove(runID)
+
+		active.broadcast(matter.ProgressEvent{
+			RunID:     runID,
 			Event:     terminalEvent,
 			Step:      result.Steps,
-			Timestamp: time.Now(),
+			Timestamp: now,
 		})
 	}()
 

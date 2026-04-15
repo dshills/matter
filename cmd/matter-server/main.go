@@ -16,6 +16,7 @@ import (
 	"github.com/dshills/matter/internal/config"
 	"github.com/dshills/matter/internal/llm"
 	"github.com/dshills/matter/internal/server"
+	"github.com/dshills/matter/internal/storage"
 )
 
 func main() {
@@ -37,7 +38,16 @@ func main() {
 		log.Fatalf("LLM client error: %v", err)
 	}
 
-	srv := server.New(cfg, llmClient)
+	store, err := storage.NewStore(storage.StoreConfig{
+		Backend: cfg.Storage.Backend,
+		Path:    cfg.Storage.Path,
+	})
+	if err != nil {
+		log.Fatalf("storage error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	srv := server.New(cfg, llmClient, store)
 
 	// Handle graceful shutdown on SIGTERM/SIGINT.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

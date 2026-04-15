@@ -15,6 +15,7 @@ import (
 
 	"github.com/dshills/matter/internal/config"
 	"github.com/dshills/matter/internal/llm"
+	"github.com/dshills/matter/internal/storage"
 	"github.com/dshills/matter/pkg/matter"
 )
 
@@ -93,6 +94,8 @@ func newTestConfig() config.Config {
 	cfg.Server.MaxConcurrentRuns = 2
 	cfg.Server.MaxPausedRuns = 2
 	cfg.Server.RunRetention = 1 * time.Hour
+	cfg.Storage.Backend = "memory"
+	cfg.LLM.MaxRetries = 0 // no retries in tests for fast failure
 	return cfg
 }
 
@@ -100,7 +103,9 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	cfg := newTestConfig()
 	client := llm.NewMockClient(nil, nil)
-	srv := New(cfg, client)
+	store := storage.NewMemoryStore()
+	t.Cleanup(func() { _ = store.Close() })
+	srv := New(cfg, client, store)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return srv, ts
@@ -135,7 +140,9 @@ func TestAuthRequired(t *testing.T) {
 	cfg := newTestConfig()
 	cfg.Server.AuthToken = "secret-token"
 	client := llm.NewMockClient(nil, nil)
-	srv := New(cfg, client)
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+	srv := New(cfg, client, store)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -257,15 +264,22 @@ func TestGetRunNotFound(t *testing.T) {
 func TestCancelRun(t *testing.T) {
 	srv, ts := newTestServer(t)
 
-	// Create a run that will stay "running" by using a mock runner directly.
+	// Create a run in the store and tracker.
 	ctx, cancel := context.WithCancel(context.Background())
+	runID := "test-cancel"
+	_ = srv.store.CreateRun(context.Background(), &storage.RunRow{
+		RunID:     runID,
+		Status:    "running",
+		Task:      "test",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	})
 	run := &ActiveRun{
-		RunID:   "test-cancel",
-		Status:  StatusRunning,
-		Cancel:  cancel,
-		Created: time.Now(),
+		RunID:  runID,
+		Status: StatusRunning,
+		Cancel: cancel,
 	}
-	_ = srv.store.Add(run)
+	_ = srv.tracker.Add(run)
 	_ = ctx // keep context alive
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/runs/test-cancel", nil)
@@ -279,22 +293,27 @@ func TestCancelRun(t *testing.T) {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
 	}
 
-	run.mu.Lock()
-	if run.Status != StatusCancelled {
-		t.Errorf("status = %q, want cancelled", run.Status)
+	// Verify store was updated.
+	stored, err := srv.store.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("failed to get run from store: %v", err)
 	}
-	run.mu.Unlock()
+	if stored.Status != "cancelled" {
+		t.Errorf("store status = %q, want cancelled", stored.Status)
+	}
 }
 
 func TestCancelCompletedRun(t *testing.T) {
 	srv, ts := newTestServer(t)
 
-	run := &ActiveRun{
-		RunID:   "test-done",
-		Status:  StatusCompleted,
-		Created: time.Now(),
-	}
-	_ = srv.store.Add(run)
+	// Create a completed run in the store only (not in tracker).
+	_ = srv.store.CreateRun(context.Background(), &storage.RunRow{
+		RunID:     "test-done",
+		Status:    "completed",
+		Task:      "test",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	})
 
 	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/api/v1/runs/test-done", nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -334,14 +353,21 @@ func TestListTools(t *testing.T) {
 func TestConcurrentRunLimit(t *testing.T) {
 	srv, ts := newTestServer(t)
 
-	// Fill up the concurrent run slots.
-	for i := range srv.store.maxConcurrent {
+	// Fill up the concurrent run slots via the tracker.
+	for i := range srv.tracker.maxConcurrent {
+		runID := fmt.Sprintf("fill-%d", i)
+		_ = srv.store.CreateRun(context.Background(), &storage.RunRow{
+			RunID:     runID,
+			Status:    "running",
+			Task:      "fill",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		})
 		run := &ActiveRun{
-			RunID:   fmt.Sprintf("fill-%d", i),
-			Status:  StatusRunning,
-			Created: time.Now(),
+			RunID:  runID,
+			Status: StatusRunning,
 		}
-		if err := srv.store.Add(run); err != nil {
+		if err := srv.tracker.Add(run); err != nil {
 			t.Fatalf("failed to add run: %v", err)
 		}
 	}
@@ -359,62 +385,27 @@ func TestConcurrentRunLimit(t *testing.T) {
 	}
 }
 
-func TestGarbageCollection(t *testing.T) {
-	store := NewRunStore(10, 10, 1*time.Second)
-
-	// Add a completed run that's old enough to be GC'd.
-	run := &ActiveRun{
-		RunID:   "old-run",
-		Status:  StatusCompleted,
-		Created: time.Now().Add(-2 * time.Second),
-	}
-	_ = store.Add(run)
-
-	removed := store.GC(time.Now())
-	if removed != 1 {
-		t.Errorf("removed = %d, want 1", removed)
-	}
-
-	if store.Get("old-run") != nil {
-		t.Error("expected old run to be removed")
-	}
-}
-
-func TestGarbageCollectionKeepsRecent(t *testing.T) {
-	store := NewRunStore(10, 10, 1*time.Hour)
-
-	run := &ActiveRun{
-		RunID:   "recent-run",
-		Status:  StatusCompleted,
-		Created: time.Now(),
-	}
-	_ = store.Add(run)
-
-	removed := store.GC(time.Now())
-	if removed != 0 {
-		t.Errorf("removed = %d, want 0", removed)
-	}
-
-	if store.Get("recent-run") == nil {
-		t.Error("expected recent run to still exist")
-	}
-}
-
 func TestSSEEvents(t *testing.T) {
 	srv, ts := newTestServer(t)
 
-	// Create a completed run with stored events directly (avoids slow mock runner).
-	run := &ActiveRun{
-		RunID:   "sse-test",
-		Status:  StatusCompleted,
-		Created: time.Now(),
-		Events: []matter.ProgressEvent{
-			{RunID: "sse-test", Event: "run_started", Step: 0, Timestamp: time.Now()},
-			{RunID: "sse-test", Event: "run_completed", Step: 1, Timestamp: time.Now()},
-		},
-		Result: &matter.RunResult{Success: true},
-	}
-	_ = srv.store.Add(run)
+	// Create a completed run with stored events.
+	runID := "sse-test"
+	now := time.Now()
+	_ = srv.store.CreateRun(context.Background(), &storage.RunRow{
+		RunID:     runID,
+		Status:    "completed",
+		Task:      "test",
+		CreatedAt: now,
+		UpdatedAt: now,
+	})
+	_ = srv.store.AppendEvent(context.Background(), runID, &storage.EventRow{
+		Type:      "run_started",
+		Timestamp: now,
+	})
+	_ = srv.store.AppendEvent(context.Background(), runID, &storage.EventRow{
+		Type:      "run_completed",
+		Timestamp: now,
+	})
 
 	// Connect to SSE — should get stored events then close (run is completed).
 	resp, err := http.Get(ts.URL + "/api/v1/runs/sse-test/events")
@@ -452,19 +443,27 @@ func TestAnswerPausedRun(t *testing.T) {
 		},
 	}
 
+	runID := "paused-run"
 	_, cancel := context.WithCancel(context.Background())
+	_ = srv.store.CreateRun(context.Background(), &storage.RunRow{
+		RunID:     runID,
+		Status:    "paused",
+		Task:      "test",
+		Question:  "What color?",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	})
 	run := &ActiveRun{
-		RunID:  "paused-run",
+		RunID:  runID,
 		Status: StatusPaused,
 		Cancel: cancel,
-		Result: &matter.RunResult{
-			Paused:   true,
-			Question: &matter.AskRequest{Question: "What color?"},
-		},
-		Created: time.Now(),
-		Runner:  mock,
+		Runner: mock,
 	}
-	_ = srv.store.Add(run)
+	_ = srv.tracker.Add(run)
+	// Transition to paused so counters are correct.
+	run.mu.Lock()
+	srv.tracker.TransitionStatus(run, StatusPaused)
+	run.mu.Unlock()
 
 	body := `{"answer":"blue"}`
 	resp, err := http.Post(ts.URL+"/api/v1/runs/paused-run/answer", "application/json", strings.NewReader(body))
@@ -480,23 +479,35 @@ func TestAnswerPausedRun(t *testing.T) {
 	// Wait for resume to complete.
 	time.Sleep(200 * time.Millisecond)
 
-	if !mock.resumed {
+	mock.mu.Lock()
+	resumed := mock.resumed
+	answer := mock.answer
+	mock.mu.Unlock()
+
+	if !resumed {
 		t.Error("expected runner to be resumed")
 	}
-	if mock.answer != "blue" {
-		t.Errorf("answer = %q, want blue", mock.answer)
+	if answer != "blue" {
+		t.Errorf("answer = %q, want blue", answer)
 	}
 }
 
 func TestAnswerNotPaused(t *testing.T) {
 	srv, ts := newTestServer(t)
 
+	runID := "running-run"
+	_ = srv.store.CreateRun(context.Background(), &storage.RunRow{
+		RunID:     runID,
+		Status:    "running",
+		Task:      "test",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	})
 	run := &ActiveRun{
-		RunID:   "running-run",
-		Status:  StatusRunning,
-		Created: time.Now(),
+		RunID:  runID,
+		Status: StatusRunning,
 	}
-	_ = srv.store.Add(run)
+	_ = srv.tracker.Add(run)
 
 	body := `{"answer":"hello"}`
 	resp, err := http.Post(ts.URL+"/api/v1/runs/running-run/answer", "application/json", strings.NewReader(body))
@@ -513,17 +524,16 @@ func TestAnswerNotPaused(t *testing.T) {
 func TestRunStatusPaused(t *testing.T) {
 	srv, ts := newTestServer(t)
 
-	run := &ActiveRun{
-		RunID:  "paused-status",
-		Status: StatusPaused,
-		Result: &matter.RunResult{
-			Paused:   true,
-			Question: &matter.AskRequest{Question: "Pick one"},
-			Steps:    2,
-		},
-		Created: time.Now(),
-	}
-	_ = srv.store.Add(run)
+	runID := "paused-status"
+	_ = srv.store.CreateRun(context.Background(), &storage.RunRow{
+		RunID:     runID,
+		Status:    "paused",
+		Task:      "test",
+		Question:  "Pick one",
+		Steps:     2,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	})
 
 	resp, err := http.Get(ts.URL + "/api/v1/runs/paused-status")
 	if err != nil {
@@ -546,9 +556,8 @@ func TestRunStatusPaused(t *testing.T) {
 
 func TestBroadcastTerminalClosesSubscribers(t *testing.T) {
 	run := &ActiveRun{
-		RunID:   "broadcast-test",
-		Status:  StatusRunning,
-		Created: time.Now(),
+		RunID:  "broadcast-test",
+		Status: StatusRunning,
 	}
 
 	ch := run.Subscribe()
@@ -570,4 +579,91 @@ func TestBroadcastTerminalClosesSubscribers(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Error("timed out waiting for channel close")
 	}
+}
+
+func TestStartupReconciliation(t *testing.T) {
+	store := storage.NewMemoryStore()
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+
+	// Create a "running" run that simulates a stale run from before restart.
+	_ = store.CreateRun(ctx, &storage.RunRow{
+		RunID:     "stale-run",
+		Status:    "running",
+		Task:      "stale task",
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+		UpdatedAt: time.Now().Add(-10 * time.Minute),
+	})
+
+	// Create a "paused" run.
+	_ = store.CreateRun(ctx, &storage.RunRow{
+		RunID:     "paused-run",
+		Status:    "paused",
+		Task:      "paused task",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	})
+
+	cfg := newTestConfig()
+	client := llm.NewMockClient(nil, nil)
+	srv := New(cfg, client, store)
+
+	// Run reconciliation.
+	srv.reconcileOnStartup()
+
+	// Stale running run should be marked failed.
+	run, err := store.GetRun(ctx, "stale-run")
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if run.Status != "failed" {
+		t.Errorf("stale run status = %q, want failed", run.Status)
+	}
+	if run.ErrorMessage != "server restarted" {
+		t.Errorf("error message = %q, want 'server restarted'", run.ErrorMessage)
+	}
+
+	// Paused counter should be initialized.
+	if srv.tracker.CountPaused() != 1 {
+		t.Errorf("paused count = %d, want 1", srv.tracker.CountPaused())
+	}
+}
+
+func TestRunPersistsToStore(t *testing.T) {
+	_, ts := newTestServer(t)
+
+	body := `{"task":"persist test","workspace":"."}`
+	resp, err := http.Post(ts.URL+"/api/v1/runs", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var createResp createRunResponse
+	if err := json.NewDecoder(resp.Body).Decode(&createResp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Poll until the run reaches a terminal state.
+	var status runStatusResponse
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp2, err := http.Get(ts.URL + "/api/v1/runs/" + createResp.RunID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if err := json.NewDecoder(resp2.Body).Decode(&status); err != nil {
+			_ = resp2.Body.Close()
+			t.Fatalf("failed to decode: %v", err)
+		}
+		_ = resp2.Body.Close()
+
+		if status.Status == "completed" || status.Status == "failed" {
+			return // success
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Errorf("run did not reach terminal state within timeout, status = %q", status.Status)
 }
