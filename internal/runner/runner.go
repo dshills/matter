@@ -183,6 +183,88 @@ func (r *Runner) Abort() {
 	r.pausedAt = time.Time{}
 }
 
+// PausedSnapshot returns the serialized agent snapshot for the currently
+// paused run. Returns nil if no run is paused. The snapshot can be stored
+// in RunRow.PausedState for cross-restart resume.
+func (r *Runner) PausedSnapshot() ([]byte, error) {
+	if r.pausedAgent == nil {
+		return nil, nil
+	}
+	snap := r.pausedAgent.Snapshot()
+	snap.Task = r.pausedReq.Task
+	snap.Workspace = r.pausedReq.Workspace
+	return agent.MarshalSnapshot(snap)
+}
+
+// ResumeFromSnapshot creates a fresh runner and agent from a serialized
+// snapshot, then resumes the paused run with the given answer. This is
+// used by the server to resume runs after a restart (when the original
+// runner is no longer in memory). progressFn is set on the runner before
+// execution so events are captured during the resumed run.
+func ResumeFromSnapshot(ctx context.Context, cfg config.Config, llmClient llm.Client, snapshotData []byte, answer string, pausedAt time.Time, progressFn matter.ProgressFunc) (*Runner, matter.RunResult) {
+	snap, err := agent.UnmarshalSnapshot(snapshotData)
+	if err != nil {
+		return nil, matter.RunResult{Error: fmt.Errorf("deserializing snapshot: %w", err)}
+	}
+
+	rn, err := New(cfg, llmClient)
+	if err != nil {
+		return nil, matter.RunResult{Error: fmt.Errorf("creating runner: %w", err)}
+	}
+	if progressFn != nil {
+		rn.SetProgressFunc(progressFn)
+	}
+
+	req := matter.RunRequest{
+		Task:      snap.Task,
+		Workspace: snap.Workspace,
+	}
+
+	// Build per-run components.
+	workspace := req.Workspace
+	if workspace == "" {
+		workspace = "."
+	}
+	abs, absErr := filepath.Abs(workspace)
+	if absErr != nil {
+		return rn, matter.RunResult{Error: fmt.Errorf("resolving workspace path: %w", absErr)}
+	}
+
+	registry := tools.NewRegistry()
+	if regErr := registerBuiltinTools(registry, cfg, abs); regErr != nil {
+		return rn, matter.RunResult{Error: fmt.Errorf("registering tools: %w", regErr)}
+	}
+
+	policyState := &policy.RunState{
+		MaxSteps:       cfg.Agent.MaxSteps,
+		MaxTotalTokens: cfg.Agent.MaxTotalTokens,
+		MaxCostUSD:     cfg.Agent.MaxCostUSD,
+		WorkspaceRoot:  abs,
+	}
+	checker := policy.NewChecker(policyState)
+
+	ag, agErr := agent.New(cfg, rn.llmClient, registry, checker)
+	if agErr != nil {
+		return rn, matter.RunResult{Error: fmt.Errorf("creating agent: %w", agErr)}
+	}
+	ag.SetObserver(rn.observer)
+	if rn.progressFn != nil {
+		ag.SetProgressFunc(rn.progressFn)
+	}
+	ag.RestoreFromSnapshot(snap)
+
+	pausedDuration := time.Since(pausedAt)
+	result := ag.ResumeWithAnswer(ctx, req, answer, pausedDuration)
+
+	if result.Paused {
+		rn.pausedAgent = ag
+		rn.pausedReq = req
+		rn.pausedAt = time.Now()
+	}
+
+	return rn, result
+}
+
 // SetProgressFunc registers a callback for real-time progress events.
 // Must be called before Run. Not safe for concurrent use — this is a
 // configuration method, not a runtime method. Callers must not call

@@ -46,6 +46,7 @@ type RunnerIface interface {
 	IsPaused() bool
 	SetProgressFunc(fn matter.ProgressFunc)
 	Tools() []matter.Tool
+	PausedSnapshot() ([]byte, error)
 }
 
 // Subscribe creates a new SSE subscriber channel. The caller must call

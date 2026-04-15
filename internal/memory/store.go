@@ -63,6 +63,12 @@ func (s *Store) Len() int {
 	return len(s.messages)
 }
 
+// Restore replaces the store contents with the given messages.
+func (s *Store) Restore(msgs []matter.Message) {
+	s.messages = make([]matter.Message, len(msgs))
+	copy(s.messages, msgs)
+}
+
 // SystemMessage returns the first system message, or an error if none exists.
 func (s *Store) SystemMessage() (matter.Message, error) {
 	if len(s.messages) == 0 {

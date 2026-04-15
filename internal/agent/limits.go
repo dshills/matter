@@ -9,17 +9,17 @@ import (
 
 // RunMetrics tracks cumulative metrics for limit evaluation.
 type RunMetrics struct {
-	Steps              int
-	StartTime          time.Time
-	PromptTokens       int
-	CompletionTokens   int
-	TotalTokens        int
-	CostUSD            float64
-	ConsecutiveErrors  int
-	ConsecutiveNoProg  int
-	RepeatedToolDetect bool // set by loop detector
-	AskCount           int
-	PausedDuration     time.Duration // total time spent paused (excluded from duration limit)
+	Steps              int           `json:"steps"`
+	StartTime          time.Time     `json:"start_time"`
+	PromptTokens       int           `json:"prompt_tokens"`
+	CompletionTokens   int           `json:"completion_tokens"`
+	TotalTokens        int           `json:"total_tokens"`
+	CostUSD            float64       `json:"cost_usd"`
+	ConsecutiveErrors  int           `json:"consecutive_errors"`
+	ConsecutiveNoProg  int           `json:"consecutive_no_progress"`
+	RepeatedToolDetect bool          `json:"repeated_tool_detect"` // set by loop detector
+	AskCount           int           `json:"ask_count"`
+	PausedDuration     time.Duration `json:"paused_duration"` // total time spent paused (excluded from duration limit)
 }
 
 // LimitCheck identifies which limit was exceeded.

@@ -89,6 +89,10 @@ func (m *mockRunner) Tools() []matter.Tool {
 	return m.tools
 }
 
+func (m *mockRunner) PausedSnapshot() ([]byte, error) {
+	return nil, nil
+}
+
 func newTestConfig() config.Config {
 	cfg := config.DefaultConfig()
 	cfg.Server.MaxConcurrentRuns = 2

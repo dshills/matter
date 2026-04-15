@@ -184,7 +184,7 @@ func (s *Server) executeRun(ctx context.Context, rn *runner.Runner, run *ActiveR
 		// Keep Runner alive for Resume. Update store with paused state.
 		run.mu.Unlock()
 
-		s.updateRunPaused(run.RunID, result, now)
+		s.updateRunPaused(run.RunID, rn, result, now)
 
 		run.broadcast(matter.ProgressEvent{
 			RunID:     run.RunID,
@@ -242,6 +242,7 @@ func (s *Server) updateRunFromResult(runID string, result *matter.RunResult, sta
 	stored.TotalTokens = result.TotalTokens
 	stored.TotalCostUSD = result.TotalCostUSD
 	stored.DurationMS = now.Sub(stored.CreatedAt).Milliseconds()
+	stored.PausedState = nil // clear snapshot on terminal state
 
 	if result.Error != nil {
 		stored.ErrorMessage = result.Error.Error()
@@ -255,8 +256,9 @@ func (s *Server) updateRunFromResult(runID string, result *matter.RunResult, sta
 	}
 }
 
-// updateRunPaused persists the paused state of a run to the store.
-func (s *Server) updateRunPaused(runID string, result matter.RunResult, now time.Time) {
+// updateRunPaused persists the paused state of a run to the store,
+// including the serialized agent snapshot for cross-restart resume.
+func (s *Server) updateRunPaused(runID string, rn RunnerIface, result matter.RunResult, now time.Time) {
 	ctx := context.Background()
 	stored, err := s.store.GetRun(ctx, runID)
 	if err != nil {
@@ -272,6 +274,13 @@ func (s *Server) updateRunPaused(runID string, result matter.RunResult, now time
 	stored.DurationMS = now.Sub(stored.CreatedAt).Milliseconds()
 	if result.Question != nil {
 		stored.Question = result.Question.Question
+	}
+
+	// Serialize agent snapshot for cross-restart resume.
+	if snapData, snapErr := rn.PausedSnapshot(); snapErr != nil {
+		log.Printf("failed to serialize snapshot for run %s: %v", runID, snapErr)
+	} else {
+		stored.PausedState = snapData
 	}
 
 	if err := s.store.UpdateRun(ctx, stored); err != nil {
@@ -461,27 +470,35 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAnswer resumes a paused run with the user's answer.
+// Supports two paths:
+// 1. In-memory resume: runner is still in the tracker (normal case).
+// 2. Store-backed resume: runner is gone (post-restart), snapshot is in the store.
 func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
-
-	// Look up in tracker (paused runs must be active).
-	active := s.tracker.Get(runID)
-	if active == nil {
-		writeError(w, http.StatusNotFound, "run not found or not active")
-		return
-	}
 
 	var req answerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-
 	if req.Answer == "" {
 		writeError(w, http.StatusBadRequest, "answer is required")
 		return
 	}
 
+	// Try in-memory path first.
+	active := s.tracker.Get(runID)
+	if active != nil {
+		s.resumeFromTracker(w, active, runID, req.Answer)
+		return
+	}
+
+	// Fallback: store-backed resume (post-restart).
+	s.resumeFromStore(w, r, runID, req.Answer)
+}
+
+// resumeFromTracker resumes a paused run using the in-memory runner.
+func (s *Server) resumeFromTracker(w http.ResponseWriter, active *ActiveRun, runID, answer string) {
 	active.mu.Lock()
 	if active.Status != StatusPaused {
 		active.mu.Unlock()
@@ -494,7 +511,6 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Atomically check concurrent run limit and transition to running.
 	if !s.tracker.TryResume(active) {
 		active.mu.Unlock()
 		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("concurrent run limit reached (%d)", s.tracker.maxConcurrent))
@@ -503,73 +519,160 @@ func (s *Server) handleAnswer(w http.ResponseWriter, r *http.Request) {
 
 	rn := active.Runner
 
-	// Create a new cancel context for the resumed run.
 	ctx, cancel := context.WithCancel(context.Background())
 	active.Cancel = cancel
 	active.mu.Unlock()
 
-	// Update store status.
-	storeCtx := context.Background()
-	stored, err := s.store.GetRun(storeCtx, runID)
-	if err == nil {
+	// Update store status. Retain PausedState until the run reaches a
+	// terminal state — updateRunFromResult clears it.
+	if stored, getErr := s.store.GetRun(context.Background(), runID); getErr != nil {
+		log.Printf("failed to get run %s for resume update: %v", runID, getErr)
+	} else {
 		stored.Status = "running"
 		stored.UpdatedAt = time.Now()
 		stored.Question = ""
-		_ = s.store.UpdateRun(storeCtx, stored)
+		_ = s.store.UpdateRun(context.Background(), stored)
 	}
 
-	// Resume in a background goroutine.
 	go func() {
-		result := rn.Resume(ctx, req.Answer)
-		now := time.Now()
-
-		active.mu.Lock()
-
-		if result.Paused {
-			s.tracker.TransitionStatus(active, StatusPaused)
-			active.mu.Unlock()
-
-			s.updateRunPaused(runID, result, now)
-
-			active.broadcast(matter.ProgressEvent{
-				RunID:     runID,
-				Event:     "run_paused",
-				Timestamp: now,
-			})
-			return
-		}
-
-		// Release context and runner for terminal states.
-		cancel()
-
-		var terminalEvent string
-		var status string
-		if result.Error != nil {
-			s.tracker.TransitionStatus(active, StatusFailed)
-			terminalEvent = "run_failed"
-			status = "failed"
-		} else {
-			s.tracker.TransitionStatus(active, StatusCompleted)
-			terminalEvent = "run_completed"
-			status = "completed"
-		}
-		active.Runner = nil
-		active.mu.Unlock()
-
-		s.updateRunFromResult(runID, &result, status, now)
-		s.tracker.Remove(runID)
-
-		active.broadcast(matter.ProgressEvent{
-			RunID:     runID,
-			Event:     terminalEvent,
-			Step:      result.Steps,
-			Timestamp: now,
-		})
+		result := rn.Resume(ctx, answer)
+		s.finalizeResume(runID, rn, active, cancel, result)
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"run_id": runID,
 		"status": string(StatusRunning),
+	})
+}
+
+// resumeFromStore resumes a paused run from the persistent store.
+// This is used after a server restart when the runner is no longer in memory.
+func (s *Server) resumeFromStore(w http.ResponseWriter, r *http.Request, runID, answer string) {
+	stored, err := s.store.GetRun(r.Context(), runID)
+	if err != nil {
+		var notFound *storage.ErrNotFound
+		if errors.As(err, &notFound) {
+			writeError(w, http.StatusNotFound, "run not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to load run")
+		}
+		return
+	}
+
+	if stored.Status != "paused" {
+		writeError(w, http.StatusConflict, fmt.Sprintf("run is %s, not paused", stored.Status))
+		return
+	}
+
+	if len(stored.PausedState) == 0 {
+		writeError(w, http.StatusInternalServerError, "no snapshot available for resume")
+		return
+	}
+
+	// Parse the paused timestamp from store for duration tracking.
+	pausedAt := stored.UpdatedAt
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Create a tracker entry for the resumed run.
+	active := &ActiveRun{
+		RunID:  runID,
+		Status: StatusRunning,
+		Cancel: cancel,
+	}
+
+	if addErr := s.tracker.Add(active); addErr != nil {
+		cancel()
+		writeError(w, http.StatusTooManyRequests, addErr.Error())
+		return
+	}
+
+	// Update store to running but retain PausedState until the run
+	// reaches a terminal state or re-pauses. This prevents data loss
+	// if the server crashes during resume.
+	stored.Status = "running"
+	stored.UpdatedAt = time.Now()
+	stored.Question = ""
+	snapshotData := stored.PausedState
+	if updateErr := s.store.UpdateRun(r.Context(), stored); updateErr != nil {
+		cancel()
+		s.tracker.Remove(runID)
+		writeError(w, http.StatusInternalServerError, "failed to update run status")
+		return
+	}
+
+	go func() {
+		// Set up progress callback before resuming so events are captured.
+		progressFn := func(event matter.ProgressEvent) {
+			event.RunID = runID
+			data, _ := json.Marshal(event.Data)
+			if appendErr := s.store.AppendEvent(context.Background(), runID, &storage.EventRow{
+				Type:      event.Event,
+				Data:      string(data),
+				Timestamp: event.Timestamp,
+			}); appendErr != nil {
+				log.Printf("failed to persist event for run %s: %v", runID, appendErr)
+			}
+			active.broadcast(event)
+		}
+
+		rn, result := runner.ResumeFromSnapshot(ctx, s.cfg, s.llmClient, snapshotData, answer, pausedAt, progressFn)
+		s.finalizeResume(runID, rn, active, cancel, result)
+	}()
+
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"run_id": runID,
+		"status": string(StatusRunning),
+	})
+}
+
+// finalizeResume handles post-resume lifecycle: pause persistence,
+// terminal state transitions, store updates, and event broadcasting.
+// Shared by resumeFromTracker and resumeFromStore goroutines.
+func (s *Server) finalizeResume(runID string, rn RunnerIface, active *ActiveRun, cancel context.CancelFunc, result matter.RunResult) {
+	now := time.Now()
+
+	active.mu.Lock()
+
+	if result.Paused {
+		active.Runner = rn
+		s.tracker.TransitionStatus(active, StatusPaused)
+		active.mu.Unlock()
+
+		s.updateRunPaused(runID, rn, result, now)
+
+		active.broadcast(matter.ProgressEvent{
+			RunID:     runID,
+			Event:     "run_paused",
+			Timestamp: now,
+		})
+		return
+	}
+
+	cancel()
+
+	var terminalEvent string
+	var status string
+	if result.Error != nil {
+		s.tracker.TransitionStatus(active, StatusFailed)
+		terminalEvent = "run_failed"
+		status = "failed"
+	} else {
+		s.tracker.TransitionStatus(active, StatusCompleted)
+		terminalEvent = "run_completed"
+		status = "completed"
+	}
+	active.Runner = nil
+	active.mu.Unlock()
+
+	s.updateRunFromResult(runID, &result, status, now)
+	s.tracker.Remove(runID)
+
+	active.broadcast(matter.ProgressEvent{
+		RunID:     runID,
+		Event:     terminalEvent,
+		Step:      result.Steps,
+		Timestamp: now,
 	})
 }
 

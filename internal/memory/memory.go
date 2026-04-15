@@ -69,6 +69,17 @@ func (m *Manager) MessageCount() int {
 	return m.store.Len()
 }
 
+// Messages returns a copy of all messages (for snapshot serialization).
+func (m *Manager) Messages() []matter.Message {
+	return m.store.All()
+}
+
+// RestoreMessages replaces the message store contents with the given messages.
+// Used when restoring from a serialized snapshot.
+func (m *Manager) RestoreMessages(msgs []matter.Message) {
+	m.store.Restore(msgs)
+}
+
 // summarizeOld replaces messages outside the recent window with a summary.
 func (m *Manager) summarizeOld(ctx context.Context) error {
 	nonSystem := m.store.NonSystemMessages()
