@@ -339,6 +339,15 @@ func registerBuiltinTools(reg *tools.Registry, cfg config.Config, workspace stri
 		}
 	}
 
+	if cfg.Tools.EnableGit {
+		gh := builtin.NewGitHelper(workspace, cfg.Sandbox.MaxOutputBytes)
+		for _, t := range builtin.GitReadTools(gh) {
+			if err := reg.Register(t); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
