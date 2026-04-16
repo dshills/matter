@@ -41,6 +41,16 @@ func GitReadTools(gh *GitHelper) []matter.Tool {
 	}
 }
 
+// GitWriteTools returns the mutating git tools (add, commit, branch, checkout).
+func GitWriteTools(gh *GitHelper) []matter.Tool {
+	return []matter.Tool{
+		NewGitAdd(gh),
+		NewGitCommit(gh),
+		NewGitBranch(gh),
+		NewGitCheckout(gh),
+	}
+}
+
 // ensureRepo lazily discovers the git repo root.
 func (g *GitHelper) ensureRepo() error {
 	g.once.Do(func() {

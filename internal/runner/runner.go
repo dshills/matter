@@ -346,6 +346,11 @@ func registerBuiltinTools(reg *tools.Registry, cfg config.Config, workspace stri
 				return err
 			}
 		}
+		for _, t := range builtin.GitWriteTools(gh) {
+			if err := reg.Register(t); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
