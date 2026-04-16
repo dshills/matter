@@ -37,7 +37,7 @@ The system follows a step-based agent loop: accept task -> enter loop -> (plan v
 - **`internal/planner/`** — LLM decision engine producing typed `Decision` structs (tool call, complete, fail). Includes JSON repair pipeline (direct parse -> local cleanup -> LLM correction -> error)
 - **`internal/memory/`** — Context management with recent message window + historical summaries. Handles output truncation and summarization triggers
 - **`internal/llm/`** — Provider-abstracted LLM client (`Client` interface with `Complete` method). Retry with backoff, token/cost tracking. Mock client required for deterministic tests
-- **`internal/tools/`** — Tool registry + executor with schema validation, timeout, safety classification. Built-in tools in `builtin/` subdirectory
+- **`internal/tools/`** — Tool registry + executor with schema validation, timeout, safety classification. Built-in tools in `builtin/` subdirectory (workspace_read/write/find/grep/edit, web_fetch, command_exec, git_status/diff/log/blame/add/commit/branch/checkout)
 - **`internal/observe/`** — Structured JSON logging, per-step tracing, metrics counters, run recording for replay
 - **`internal/policy/`** — Guardrails: budget enforcement, filesystem confinement, sandbox rules, approval gates
 - **`internal/config/`** — Config loading with precedence: CLI flags > env vars > config file > defaults

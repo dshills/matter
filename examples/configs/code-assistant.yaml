@@ -35,8 +35,12 @@ planner:
 tools:
   enable_workspace_read: true
   enable_workspace_write: true
+  enable_workspace_find: true
+  enable_workspace_grep: true
+  enable_workspace_edit: true
   enable_web_fetch: false
   enable_command_exec: true
+  enable_git: true
   command_allowlist:
     - go
     - git

@@ -169,8 +169,12 @@ llm:
 tools:
   enable_workspace_read: true
   enable_workspace_write: true
+  enable_workspace_find: true    # glob file search (default: true)
+  enable_workspace_grep: true    # regex content search (default: true)
+  enable_workspace_edit: false   # diff-based editing (opt-in)
   enable_web_fetch: true
   enable_command_exec: false
+  enable_git: false              # git tools (opt-in)
   command_allowlist:         # empty = all commands allowed (when enabled)
     - go
     - git
@@ -229,10 +233,21 @@ export MATTER_STORAGE_PATH=~/.matter/matter.db
 |------|------|-------------|-------------|
 | `workspace_read` | yes | no | Read files from the workspace. Large files are truncated. Hidden paths blocked unless allowed. |
 | `workspace_write` | no | yes | Write files within the workspace. Atomic writes via temp file + sync + rename. Requires `overwrite=true` for existing files. |
+| `workspace_find` | yes | no | Find files matching a glob pattern (`**/*.go`). Skips hidden dirs, node_modules, vendor, and .gitignore'd paths. |
+| `workspace_grep` | yes | no | Search file content by regex with optional context lines. Grep-style output with file:line format. |
+| `workspace_edit` | no | yes | Replace a specific text region in a file without rewriting the entire file. Requires exact unique match. Disabled by default. |
 | `web_fetch` | no | no | HTTP GET from allowed domains only. Redirect targets validated against allowlist. Responses truncated at limit. |
 | `command_exec` | no | yes | Execute commands in the workspace. Disabled by default. Runs with a minimal environment. Supports command allowlist (`command_allowlist` config). |
+| `git_status` | yes | no | Show working tree status (porcelain format). Requires `enable_git`. |
+| `git_diff` | yes | no | Show staged or unstaged changes. Supports path filtering. |
+| `git_log` | yes | no | Show recent commit history (oneline or medium format). |
+| `git_blame` | yes | no | Show per-line authorship for a file. |
+| `git_add` | no | yes | Stage files for commit. |
+| `git_commit` | no | yes | Create a commit with a message. No --amend or --no-verify. |
+| `git_branch` | no | yes | List or create branches. Validates branch names. |
+| `git_checkout` | no | yes | Switch branches or restore files to committed state. |
 
-> **Note:** When `command_allowlist` is empty and `command_exec` is enabled, all commands in PATH are permitted. Use the allowlist to restrict to specific commands in production.
+> **Note:** `workspace_find` and `workspace_grep` are enabled by default (read-only). `workspace_edit` and all `git_*` tools are disabled by default and require explicit opt-in via config.
 
 ### MCP tools
 
