@@ -7,7 +7,7 @@
 
 llm:
   provider: openai
-  model: gpt-4o
+  model: gpt-5.4
   timeout: 30s
   max_retries: 3
 
@@ -24,7 +24,7 @@ memory:
   recent_messages: 10
   summarize_after_messages: 15
   summarize_after_tokens: 16000
-  summarization_model: gpt-4o-mini
+  summarization_model: gpt-5.4-mini
   max_tool_result_chars: 8000
 
 planner:

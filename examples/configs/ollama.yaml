@@ -2,14 +2,14 @@
 # Requires Ollama running locally: https://ollama.ai
 #
 # Pull a model first:
-#   ollama pull llama3.1
+#   ollama pull llama3.3
 #
 # Usage:
 #   matter run --task "Summarize the README" --workspace ./my-project --config examples/configs/ollama.yaml
 
 llm:
   provider: ollama
-  model: llama3.1
+  model: llama3.3
   timeout: 120s   # longer timeout for model loading
   max_retries: 2
 

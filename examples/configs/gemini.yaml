@@ -7,7 +7,7 @@
 
 llm:
   provider: gemini
-  model: gemini-2.5-flash
+  model: gemini-2.5-flash-preview-04-17
   timeout: 30s
   max_retries: 3
 

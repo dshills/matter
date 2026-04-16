@@ -147,7 +147,7 @@ memory:
   recent_messages: 10            # messages kept after summarization
   summarize_after_messages: 15   # total messages before triggering summarization
   summarize_after_tokens: 16000
-  summarization_model: gpt-4o-mini
+  summarization_model: gpt-5.4-mini
   max_tool_result_chars: 8000
 
 planner:
@@ -157,7 +157,7 @@ planner:
 
 llm:
   provider: openai   # openai, anthropic, gemini, ollama, ollama-remote, or mock
-  model: gpt-4o
+  model: gpt-5.4
   api_key: ""        # or set OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY env var
   base_url: ""       # optional: override API endpoint (required for ollama-remote)
   timeout: 30s       # ollama defaults to 120s for model loading
@@ -213,7 +213,7 @@ Every config field can be overridden with an environment variable. The pattern i
 
 ```bash
 export MATTER_AGENT_MAX_STEPS=50
-export MATTER_LLM_MODEL=gpt-4o-mini
+export MATTER_LLM_MODEL=gpt-5.4-mini
 export MATTER_TOOLS_ENABLE_COMMAND_EXEC=true
 export MATTER_OBSERVE_LOG_LEVEL=debug
 export MATTER_STORAGE_BACKEND=sqlite
@@ -402,7 +402,7 @@ func main() {
     cfg := config.DefaultConfig()
     cfg.Agent.MaxSteps = 10
     cfg.LLM.Provider = "openai"
-    cfg.LLM.Model = "gpt-4o"
+    cfg.LLM.Model = "gpt-5.4"
 
     client, err := llm.NewClient(llm.ProviderConfig{
         Provider: cfg.LLM.Provider,

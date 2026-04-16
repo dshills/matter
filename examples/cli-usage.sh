@@ -62,7 +62,7 @@ matter run --task "Explain the architecture" --workspace . \
   --config examples/configs/gemini.yaml
 
 # Local Ollama (no API key needed)
-# First: ollama pull llama3.1
+# First: ollama pull llama3.3
 matter run --task "Explain the architecture" --workspace . \
   --config examples/configs/ollama.yaml
 
@@ -98,7 +98,7 @@ matter tools --config examples/configs/code-assistant.yaml
 
 MATTER_AGENT_MAX_STEPS=50 \
 MATTER_AGENT_MAX_COST_USD=10.00 \
-MATTER_LLM_MODEL=gpt-4o-mini \
+MATTER_LLM_MODEL=gpt-5.4-mini \
 MATTER_TOOLS_ENABLE_COMMAND_EXEC=true \
   matter run --task "Run the tests" --workspace . --config config.yaml
 
