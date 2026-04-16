@@ -332,6 +332,13 @@ func registerBuiltinTools(reg *tools.Registry, cfg config.Config, workspace stri
 		}
 	}
 
+	if cfg.Tools.EnableWorkspaceEdit {
+		t := builtin.NewWorkspaceEdit(workspace, cfg.Tools.AllowedHiddenPaths)
+		if err := reg.Register(t); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
