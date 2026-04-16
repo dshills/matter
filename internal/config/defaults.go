@@ -41,6 +41,10 @@ func DefaultConfig() Config {
 			EnableWorkspaceWrite: true,
 			EnableWebFetch:       true,
 			EnableCommandExec:    false,
+			EnableWorkspaceFind:  true,
+			EnableWorkspaceGrep:  true,
+			EnableWorkspaceEdit:  false,
+			EnableGit:            false,
 		},
 		Sandbox: SandboxConfig{
 			CommandTimeout:      20 * time.Second,

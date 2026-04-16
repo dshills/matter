@@ -318,6 +318,20 @@ func registerBuiltinTools(reg *tools.Registry, cfg config.Config, workspace stri
 		}
 	}
 
+	if cfg.Tools.EnableWorkspaceFind {
+		t := builtin.NewWorkspaceFind(workspace, cfg.Tools.AllowedHiddenPaths)
+		if err := reg.Register(t); err != nil {
+			return err
+		}
+	}
+
+	if cfg.Tools.EnableWorkspaceGrep {
+		t := builtin.NewWorkspaceGrep(workspace, cfg.Sandbox.MaxOutputBytes, cfg.Tools.AllowedHiddenPaths)
+		if err := reg.Register(t); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

@@ -81,6 +81,10 @@ type ToolsConfig struct {
 	WebFetchAllowedDomains []string          `yaml:"web_fetch_allowed_domains"`
 	AllowedHiddenPaths     []string          `yaml:"allowed_hidden_paths"`
 	MCPServers             []MCPServerConfig `yaml:"mcp_servers"`
+	EnableWorkspaceFind    bool              `yaml:"enable_workspace_find"`
+	EnableWorkspaceGrep    bool              `yaml:"enable_workspace_grep"`
+	EnableWorkspaceEdit    bool              `yaml:"enable_workspace_edit"`
+	EnableGit              bool              `yaml:"enable_git"`
 }
 
 // MCPServerConfig configures an external MCP tool server.
@@ -225,6 +229,10 @@ func ApplyEnv(cfg Config) (Config, error) {
 	cfg.Tools.EnableWorkspaceWrite = envBool("MATTER_TOOLS_ENABLE_WORKSPACE_WRITE", cfg.Tools.EnableWorkspaceWrite)
 	cfg.Tools.EnableWebFetch = envBool("MATTER_TOOLS_ENABLE_WEB_FETCH", cfg.Tools.EnableWebFetch)
 	cfg.Tools.EnableCommandExec = envBool("MATTER_TOOLS_ENABLE_COMMAND_EXEC", cfg.Tools.EnableCommandExec)
+	cfg.Tools.EnableWorkspaceFind = envBool("MATTER_TOOLS_ENABLE_WORKSPACE_FIND", cfg.Tools.EnableWorkspaceFind)
+	cfg.Tools.EnableWorkspaceGrep = envBool("MATTER_TOOLS_ENABLE_WORKSPACE_GREP", cfg.Tools.EnableWorkspaceGrep)
+	cfg.Tools.EnableWorkspaceEdit = envBool("MATTER_TOOLS_ENABLE_WORKSPACE_EDIT", cfg.Tools.EnableWorkspaceEdit)
+	cfg.Tools.EnableGit = envBool("MATTER_TOOLS_ENABLE_GIT", cfg.Tools.EnableGit)
 	if cfg.Sandbox.CommandTimeout, err = envDuration("MATTER_SANDBOX_COMMAND_TIMEOUT", cfg.Sandbox.CommandTimeout); err != nil {
 		return cfg, err
 	}

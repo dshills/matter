@@ -95,6 +95,8 @@ func TestNewWithAllToolsDisabled(t *testing.T) {
 	cfg.Tools.EnableWorkspaceWrite = false
 	cfg.Tools.EnableWebFetch = false
 	cfg.Tools.EnableCommandExec = false
+	cfg.Tools.EnableWorkspaceFind = false
+	cfg.Tools.EnableWorkspaceGrep = false
 
 	r, err := New(cfg, mockClient())
 	if err != nil {
