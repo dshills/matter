@@ -51,20 +51,23 @@ make build-server   # builds matter-server
 # Run a task with the mock LLM client (no API key needed)
 matter run --task "List the files in the workspace" --workspace ./my-project --mock
 
-# Run a task with OpenAI
+# Run a task with OpenAI (default provider)
 export OPENAI_API_KEY=sk-...
 matter run --task "Analyze the codebase" --workspace ./my-project
 
-# Run a task with Anthropic
+# Run a task with Anthropic (requires config to set provider)
 export ANTHROPIC_API_KEY=sk-ant-...
-matter run --task "Analyze the codebase" --workspace ./my-project --config config.yaml
+matter run --task "Analyze the codebase" --workspace ./my-project \
+  --config examples/configs/anthropic.yaml
 
-# Run a task with Gemini
+# Run a task with Gemini (requires config to set provider)
 export GEMINI_API_KEY=AI...
-matter run --task "Analyze the codebase" --workspace ./my-project --config config.yaml
+matter run --task "Analyze the codebase" --workspace ./my-project \
+  --config examples/configs/gemini.yaml
 
 # Run a task with local Ollama (no API key needed)
-matter run --task "Analyze the codebase" --workspace ./my-project --config config.yaml
+matter run --task "Analyze the codebase" --workspace ./my-project \
+  --config examples/configs/ollama.yaml
 
 # Print the effective configuration
 matter config
